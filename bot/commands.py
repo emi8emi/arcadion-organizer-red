@@ -3,8 +3,36 @@ from typing import Optional
 
 import discord
 from discord import app_commands
+from zoneinfo import available_timezones
 
 from . import handlers
+
+
+
+# 1. Cache the sorted list of timezones globally at startup 
+# This avoids scanning 600 timezones on every single keystroke
+ALL_TIMEZONES = sorted(list(available_timezones()))
+
+# 2. Define the autocomplete callback function
+async def timezone_autocomplete(
+    interaction: discord.Interaction, 
+    current: str
+) -> list[app_commands.Choice[str]]:
+    """Filters timezones on the fly based on user input (max 25 results)."""
+    cleaned_input = current.strip().lower()
+    
+    # Filter the cached list to find partial matches
+    matches = [
+        tz for tz in ALL_TIMEZONES 
+        if cleaned_input in tz.lower()
+    ]
+    
+    # Discord cuts off autocomplete arrays at exactly 25 items
+    return [
+        app_commands.Choice(name=tz, value=tz)
+        for tz in matches[:25]
+    ]
+
 
 
 class RunGroup(app_commands.Group):
@@ -13,6 +41,7 @@ class RunGroup(app_commands.Group):
         self.ctx = ctx
 
     @app_commands.command(name="create", description="Create a run (draft) with its slot grid")
+    @app_commands.autocomplete(timezone=timezone_autocomplete)
     @app_commands.describe(
         name="Name of the run, e.g. UWU week 1",
         content="The fight, e.g. Ultima Weapon (Ultimate)",
@@ -20,12 +49,13 @@ class RunGroup(app_commands.Group):
         end_date="Last day (inclusive), like 2026-11-08",
         signup_deadline="Eastern time, like 2026-10-30 18:00",
         earliest_start="Optional: first slot start to offer, like 17:00",
-        latest_start="Optional: last slot start to offer, like 20:00")
+        latest_start="Optional: last slot start to offer, like 20:00",
+        timezone="Optional: Iana timezone (e.g., America/New_York)")
     async def create(self, interaction: discord.Interaction, name: str, content: str, start_date: str,
                      end_date: str, signup_deadline: str, earliest_start: Optional[str] = None,
-                     latest_start: Optional[str] = None):
+                     latest_start: Optional[str] = None, timezone: Optional[str] = None):
         await handlers.run_create(self.ctx, interaction, name, content, start_date, end_date,
-                                  signup_deadline, earliest_start, latest_start)
+                                  signup_deadline, earliest_start, latest_start, timezone)
 
     @create.autocomplete("content")
     async def create_content_choices(self, interaction: discord.Interaction, current: str):
@@ -90,6 +120,7 @@ def register(tree, ctx):
     tree.add_command(HelperGroup(ctx))
 
     @tree.command(name="availability", description="Sign up: your roles, prog and the slots you can play")
+    # no autocomplete for this, since i'm not sure if it's spammable
     @app_commands.describe(timezone="Optional, like America/Chicago (slot times already show in your local time)")
     @app_commands.guild_only()
     async def availability(interaction: discord.Interaction, timezone: Optional[str] = None):

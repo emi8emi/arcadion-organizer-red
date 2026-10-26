@@ -54,14 +54,62 @@ def parse_hm(text):
     return time(h, m)
 
 
+
 def parse_date(text):
-    return date.fromisoformat(text.strip())
+    cleaned = text.strip().lower()
+    
+    if cleaned == "today":
+        return date.today()
+    if cleaned == "tomorrow":
+        return date.today() + timedelta(days=1)
+    if cleaned == "yesterday":
+        return date.today() - timedelta(days=1)
+        
+    return date.fromisoformat(cleaned)
 
 
-def parse_local_datetime(text, tz):
-    """'2026-11-05 18:00' in the grid timezone -> aware UTC datetime."""
-    naive = datetime.strptime(text.strip(), "%Y-%m-%d %H:%M")
-    return naive.replace(tzinfo=ZoneInfo(tz)).astimezone(UTC)
+
+def parse_local_datetime(text: str, tz_name: str) -> datetime:
+    """Parses absolute or relative local times into an aware UTC datetime.
+    
+    Examples:
+        '2026-11-05 18:00' -> UTC datetime
+        'today 14:30'      -> UTC datetime for today at 14:30 local time
+        'tomorrow 09:00'   -> UTC datetime for tomorrow at 09:00 local time
+    """
+    cleaned = text.strip().lower()
+    local_tz = ZoneInfo(tz_name)
+    
+    # 1. Handle relative date keywords
+    if cleaned.startswith(("today", "tomorrow", "yesterday")):
+        # Split keyword from the time portion (e.g., "today 18:00" -> "today", "18:00")
+        parts = cleaned.split(maxsplit=1)
+        keyword = parts[0]
+        time_str = parts[1] if len(parts) > 1 else "00:00"
+        
+        # Get the current local date in the target timezone
+        local_today = datetime.now(local_tz).date()
+        
+        if keyword == "today":
+            target_date = local_today
+        elif keyword == "tomorrow":
+            target_date = local_today + timedelta(days=1)
+        else: # yesterday
+            target_date = local_today - timedelta(days=1)
+            
+        # Parse the remaining time component
+        naive_time = datetime.strptime(time_str, "%H:%M").time()
+        naive_dt = datetime.combine(target_date, naive_time)
+        
+    else:
+        # 2. Fallback to standard absolute format
+        naive_dt = datetime.strptime(cleaned, "%Y-%m-%d %H:%M")
+
+    # 3. Attach timezone securely and convert to UTC
+    # fold=0 ensures standard handling of ambiguous DST fallback hours
+    aware_local = naive_dt.replace(tzinfo=local_tz, fold=0)
+    return aware_local.astimezone(UTC)
+
 
 
 def day_slots(day, g):

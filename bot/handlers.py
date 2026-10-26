@@ -6,6 +6,7 @@ import io
 import json
 import re
 from pathlib import Path
+from zoneinfo import available_timezones
 
 import discord
 
@@ -61,10 +62,23 @@ def slug(text):
 # ---------------------------------------------------------------- /run
 
 async def run_create(ctx, interaction, name, content, start_date, end_date, signup_deadline,
-                     earliest_start=None, latest_start=None):
+                     earliest_start=None, latest_start=None, timezone=None):
     if not await require_organizer(ctx, interaction):
         return
-    db, tz = ctx.db, ctx.cfg["timezone"]
+    db = ctx.db
+    
+    # 1. Validate user_tz and fall back to ctx.cfg["timezone"] if invalid/missing
+    if timezone and timezone.strip() in available_timezones():
+        tz = timezone.strip()
+    else:
+        # Optional: Send a warning to the user if they provided a broken timezone string
+        if timezone:
+            await interaction.response.send_message(
+                f"⚠️ `{timezone}` is not a valid timezone. Falling back to default: `{ctx.cfg['timezone']}`", 
+                ephemeral=True
+            )
+        tz = ctx.cfg["timezone"]
+
     name = name.strip()
     if not name or len(name) > 60:
         return await say(interaction, "Give the run a name of 1 to 60 characters.")
@@ -75,7 +89,7 @@ async def run_create(ctx, interaction, name, content, start_date, end_date, sign
     try:
         start, end = parse_date(start_date), parse_date(end_date)
     except ValueError:
-        return await say(interaction, "Dates look like 2026-11-02 (year-month-day).")
+        return await say(interaction, "Dates look like 2026-11-02 (year-month-day). You can also use today, tomorrow and yesterday.")
     if end < start:
         return await say(interaction, "The end date is before the start date.")
     if (end - start).days + 1 > ctx.cfg["max_run_days"]:
@@ -83,7 +97,7 @@ async def run_create(ctx, interaction, name, content, start_date, end_date, sign
     try:
         deadline = parse_local_datetime(signup_deadline, tz)
     except ValueError:
-        return await say(interaction, f"The deadline looks like 2026-10-30 18:00 (time in {tz}).")
+        return await say(interaction, f"The deadline looks like 2026-10-30 18:00 (time in {tz}). You can also use today, tomorrow and yesterday.")
     try:
         for hm in (earliest_start, latest_start):
             if hm:
