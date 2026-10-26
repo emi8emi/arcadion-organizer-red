@@ -12,12 +12,12 @@ buttons, votes, standby and the weights live in later steps. See "What is not bu
 1. Create an application at <https://discord.com/developers/applications>, add a Bot, copy its token.
 2. Invite it to a test server with the scopes `bot` and `applications.commands` (no special permissions,
    no privileged intents).
-3. In this folder:
+3. In this folder (you will need [uv](https://docs.astral.sh/uv/)):
 
    ```bash
-   pip install -r requirements.txt
+   uv sync
    cp .env.example .env          # then edit .env: set DISCORD_TOKEN, and GUILD_ID for instant command sync
-   python -m bot
+   uv run python -m bot
    ```
 
    `.env` and the database are git-ignored. Never paste the token anywhere else.
@@ -28,7 +28,7 @@ buttons, votes, standby and the weights live in later steps. See "What is not bu
 
 | Step | Who | What |
 | --- | --- | --- |
-| 1 | organizer | `/run create name content start_date end_date signup_deadline [earliest_start] [latest_start]` makes a draft run and its slot grid. Use `earliest_start`/`latest_start` (for example 17:00 and 20:00) to offer fewer, busier slots. |
+| 1 | organizer | `/run create name content start_date end_date signup_deadline [earliest_start] [latest_start] [timezone]` makes a draft run and its slot grid. Use `earliest_start`/`latest_start` (for example 17:00 and 20:00) to offer fewer, busier slots. `timezone` a Iana timezone (e.g., America/New_York) to help create the run in the right time. |
 | 2 | organizer | `/helper grant @person` for each helper (once per fight). |
 | 3 | organizer | `/run open` starts signups. Only one run can be open at a time. |
 | 4 | players | `/availability`: pick roles, prog checkpoint, then a day and its slots. Each click saves. The **Limits** button sets max per day, max per run and how many checkpoints lower they accept. `/limits` and `/myschedule` show the same. |
