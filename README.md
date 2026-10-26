@@ -64,7 +64,7 @@ schema.sql         tables + the Ultima Weapon checkpoints       tests/          
 ## Tests
 
 ```bash
-python -m pytest -q
+uv run pytest
 ```
 
 They cover the grid (including both DST-change days), the database layer, the export and fingerprint,

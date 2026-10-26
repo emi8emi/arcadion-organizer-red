@@ -70,7 +70,7 @@ def test_run_create_rejects_bad_input(ctx, make_run):
         (dict(start_date="11/01/2026"), "Dates look like"),
         (dict(end_date="2026-10-30"), "end date is before"),
         (dict(end_date="2026-12-30"), "at most 14 days"),
-        (dict(signup_deadline="tomorrow"), "deadline looks like"),
+        (dict(signup_deadline="abc"), "deadline looks like"),
         (dict(signup_deadline="2026-11-02 09:00"), "before the first slot"),
         (dict(earliest_start="5pm"), "look like 17:00"),
         (dict(name=" "), "name of 1 to 60"),
