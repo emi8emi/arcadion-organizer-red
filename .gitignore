@@ -1,0 +1,26 @@
+# secrets and local state
+.env
+.env.*
+!.env.example
+*.sqlite3
+*.sqlite3-journal
+exports/
+__pycache__/
+.pytest_cache/
+.venv
+.python-version
+
+__pycache__/
+*.py[cod]
+*$py.class
+build/
+dist/
+*.egg-info/
+
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+.vscode/
+.idea/
+.DS_Store

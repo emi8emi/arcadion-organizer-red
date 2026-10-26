@@ -1,0 +1,18 @@
+{
+  "timezone": "America/New_York",
+  "slot_minutes": 90,
+  "day_start": "08:00",
+  "last_start": "23:00",
+
+  "default_max_per_day": 2,
+  "default_max_per_run": 4,
+  "max_run_days": 14,
+
+  "party": {"tank": 2, "healer": 2, "dps": 4},
+
+  "solver_phase_cross_cost": 3,
+
+  "organizer_role_id": null,
+  "db_path": "raidbot.sqlite3",
+  "export_dir": "exports"
+}

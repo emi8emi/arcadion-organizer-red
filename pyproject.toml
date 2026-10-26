@@ -1,0 +1,23 @@
+[project]
+name = "raid-matchmaking"
+version = "0.1.0"
+description = "Discord bot and CP-SAT solver that draft FFXIV raid parties"
+requires-python = ">=3.11"
+dependencies = [
+    "discord.py>=2.4",
+    "python-dotenv>=1.0",
+    "ortools>=9.10",
+    # Windows has no system IANA time zone database, so zoneinfo
+    # ("America/New_York") needs this package there.
+    "tzdata>=2024.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.uv]
+# Two plain folders (raid-bot/ and raid-solver/) share one environment;
+# nothing here is built or installed as a package.
+package = false
