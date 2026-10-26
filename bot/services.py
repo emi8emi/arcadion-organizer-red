@@ -53,7 +53,7 @@ def checkpoint_label(checkpoints, idx):
 
 def limits_text(lim):
     drop = (f"OK with being placed up to {lim['drop_checkpoints']} checkpoint(s) below your prog"
-            if lim["drop_checkpoints"] else "not OK with being placed below your prog (party finder is the alternative)")
+            if lim["drop_checkpoints"] else "not OK with being placed below your prog")
     return f"Limits: up to {lim['max_per_day']} per day, {lim['max_per_run']} per run; {drop}."
 
 
