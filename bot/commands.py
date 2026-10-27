@@ -47,15 +47,17 @@ class RunGroup(app_commands.Group):
         content="The fight, e.g. Ultima Weapon (Ultimate)",
         start_date="First day, like 2026-11-02",
         end_date="Last day (inclusive), like 2026-11-08",
-        signup_deadline="Eastern time, like 2026-10-30 18:00",
         earliest_start="Optional: first slot start to offer, like 17:00",
         latest_start="Optional: last slot start to offer, like 20:00",
-        timezone="Optional: Iana timezone (e.g., America/New_York)")
+        timezone="Optional: Iana timezone (e.g., America/New_York)",
+        cutoff_time="Optional: clock time each day's signups close, like 23:59 (default from config.json)",
+        cutoff_days_before="Optional: days before each day that signups close (default 1 = the evening before)")
     async def create(self, interaction: discord.Interaction, name: str, content: str, start_date: str,
-                     end_date: str, signup_deadline: str, earliest_start: Optional[str] = None,
-                     latest_start: Optional[str] = None, timezone: Optional[str] = None):
+                     end_date: str, earliest_start: Optional[str] = None,
+                     latest_start: Optional[str] = None, timezone: Optional[str] = None,
+                     cutoff_time: Optional[str] = None, cutoff_days_before: Optional[int] = None):
         await handlers.run_create(self.ctx, interaction, name, content, start_date, end_date,
-                                  signup_deadline, earliest_start, latest_start, timezone)
+                                  earliest_start, latest_start, timezone, cutoff_time, cutoff_days_before)
 
     @create.autocomplete("content")
     async def create_content_choices(self, interaction: discord.Interaction, current: str):
@@ -67,10 +69,21 @@ class RunGroup(app_commands.Group):
     async def open(self, interaction: discord.Interaction, name: Optional[str] = None):
         await handlers.run_open(self.ctx, interaction, name)
 
-    @app_commands.command(name="close", description="Close signups for a run")
-    @app_commands.describe(name="Run name (default: the newest run)")
-    async def close(self, interaction: discord.Interaction, name: Optional[str] = None):
-        await handlers.run_close(self.ctx, interaction, name)
+    @app_commands.command(name="close", description="Close signups for one day now, or for every remaining day")
+    @app_commands.describe(name="Run name (default: the newest run)",
+                           day="Optional: only this day, like 2026-11-02 (default: all remaining days)")
+    async def close(self, interaction: discord.Interaction, name: Optional[str] = None,
+                    day: Optional[str] = None):
+        await handlers.run_close(self.ctx, interaction, name, day)
+
+    @app_commands.command(name="extend", description="Move one day's signup cutoff (reopens a closed day)")
+    @app_commands.autocomplete(timezone=timezone_autocomplete)
+    @app_commands.describe(day="The day, like 2026-11-02", new_cutoff="New cutoff, like 2026-11-01 23:59",
+                           name="Run name (default: the newest run)",
+                           timezone="Optional: Iana timezone the new cutoff is in (default: the grid timezone)")
+    async def extend(self, interaction: discord.Interaction, day: str, new_cutoff: str,
+                     name: Optional[str] = None, timezone: Optional[str] = None):
+        await handlers.run_extend(self.ctx, interaction, day, new_cutoff, name, timezone)
 
     @app_commands.command(name="status", description="Live signup heatmap: ticks per slot, split by role")
     @app_commands.describe(name="Run name (default: the newest run)", day="Optional: only this day, like 2026-11-02")
@@ -84,16 +97,20 @@ class DraftGroup(app_commands.Group):
         super().__init__(name="draft", description="Organizers: solver hand-off", guild_only=True)
         self.ctx = ctx
 
-    @app_commands.command(name="export", description="Export signups as solver input (JSON file)")
-    @app_commands.describe(name="Run name (default: the newest run)")
-    async def export(self, interaction: discord.Interaction, name: Optional[str] = None):
-        await handlers.draft_export(self.ctx, interaction, name)
+    @app_commands.command(name="export", description="Export one day's signups as solver input (JSON file)")
+    @app_commands.describe(name="Run name (default: the newest run)",
+                           day="The day, like 2026-11-02 (default: the earliest closed day not exported yet)",
+                           force="Export a day whose signups are still open (the draft goes stale if anything changes)")
+    async def export(self, interaction: discord.Interaction, name: Optional[str] = None,
+                     day: Optional[str] = None, force: bool = False):
+        await handlers.draft_export(self.ctx, interaction, name, day, force)
 
-    @app_commands.command(name="import", description="Import a solver draft (refused if signups changed)")
-    @app_commands.describe(draft_file="The draft.json the solver wrote", name="Run name (default: the newest run)")
+    @app_commands.command(name="import", description="Import a solver draft for one day (refused if signups changed)")
+    @app_commands.describe(draft_file="The draft.json the solver wrote", name="Run name (default: the newest run)",
+                           day="The day, like 2026-11-02 (default: found from the draft's fingerprint)")
     async def import_(self, interaction: discord.Interaction, draft_file: discord.Attachment,
-                      name: Optional[str] = None):
-        await handlers.draft_import(self.ctx, interaction, draft_file, name)
+                      name: Optional[str] = None, day: Optional[str] = None):
+        await handlers.draft_import(self.ctx, interaction, draft_file, name, day)
 
 
 class HelperGroup(app_commands.Group):

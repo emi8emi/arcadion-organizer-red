@@ -13,9 +13,9 @@ import discord
 from . import heatmap
 from .config import ROOT
 from .db import DraftConflict, DuplicateRun, parse_iso
-from .grid import parse_date, parse_hm, parse_local_datetime, run_slots
-from .services import (limits_text, profile_text, signup_open, tick_lines, valid_timezone,
-                       validate_limits)
+from .grid import day_cutoff, parse_date, parse_hm, parse_local_datetime, run_slots
+from .services import (cutoff_of, day_label, day_state, day_summary_lines, limits_text, open_days,
+                       profile_text, signup_open, tick_lines, valid_timezone, validate_limits)
 from .solver_io import DraftError, build_signups, fingerprint, import_draft
 from .views import AvailabilityView
 
@@ -61,12 +61,35 @@ def slug(text):
 
 # ---------------------------------------------------------------- /run
 
-async def run_create(ctx, interaction, name, content, start_date, end_date, signup_deadline,
-                     earliest_start=None, latest_start=None, timezone=None):
+DAY_HINT = "Days look like 2026-11-02."
+
+
+def parse_day(text):
+    """'2026-11-02' (or today/tomorrow/yesterday) -> '2026-11-02'. Raises ValueError."""
+    return parse_date(text).isoformat()
+
+
+async def find_day(ctx, interaction, run, day):
+    """The run_days row for `day`, or None after telling the organizer what went wrong."""
+    try:
+        key = parse_day(day)
+    except ValueError:
+        await say(interaction, DAY_HINT)
+        return None
+    row = ctx.db.run_day(run["id"], key)
+    if row is None:
+        days = ", ".join(d["day"] for d in ctx.db.run_days(run["id"]))
+        await say(interaction, f"{key} is not a day of **{run['name']}**. Its days: {days}.")
+    return row
+
+
+async def run_create(ctx, interaction, name, content, start_date, end_date,
+                     earliest_start=None, latest_start=None, timezone=None,
+                     cutoff_time=None, cutoff_days_before=None):
     if not await require_organizer(ctx, interaction):
         return
     db = ctx.db
-    
+
     # 1. Validate user_tz and fall back to ctx.cfg["timezone"] if invalid/missing
     if timezone and timezone.strip() in available_timezones():
         tz = timezone.strip()
@@ -74,7 +97,7 @@ async def run_create(ctx, interaction, name, content, start_date, end_date, sign
         # Optional: Send a warning to the user if they provided a broken timezone string
         if timezone:
             await interaction.response.send_message(
-                f"⚠️ `{timezone}` is not a valid timezone. Falling back to default: `{ctx.cfg['timezone']}`", 
+                f"⚠️ `{timezone}` is not a valid timezone. Falling back to default: `{ctx.cfg['timezone']}`",
                 ephemeral=True
             )
         tz = ctx.cfg["timezone"]
@@ -95,9 +118,12 @@ async def run_create(ctx, interaction, name, content, start_date, end_date, sign
     if (end - start).days + 1 > ctx.cfg["max_run_days"]:
         return await say(interaction, f"Runs can be at most {ctx.cfg['max_run_days']} days long.")
     try:
-        deadline = parse_local_datetime(signup_deadline, tz)
+        cutoff_hm = parse_hm(cutoff_time or ctx.cfg["cutoff_time"])
     except ValueError:
-        return await say(interaction, f"The deadline looks like 2026-10-30 18:00 (time in {tz}). You can also use today, tomorrow and yesterday.")
+        return await say(interaction, "The cutoff time looks like 23:59 (the clock time each day's signups close).")
+    days_before = ctx.cfg["cutoff_days_before"] if cutoff_days_before is None else cutoff_days_before
+    if not 0 <= days_before <= 7:
+        return await say(interaction, "Cutoff days before must be between 0 (the day itself) and 7.")
     try:
         for hm in (earliest_start, latest_start):
             if hm:
@@ -108,17 +134,33 @@ async def run_create(ctx, interaction, name, content, start_date, end_date, sign
     slots = run_slots(start, end, ctx.grid, earliest_start, latest_start)
     if not slots:
         return await say(interaction, "Those dates and start times leave no slots.")
-    if deadline >= slots[0].start_utc:
-        return await say(interaction, "The signup deadline must be before the first slot.")
+    first_on = {}
+    for sl in slots:
+        first_on.setdefault(sl.key[:10], sl.start_utc)
+    cutoffs = {}
+    for day, first_start in first_on.items():
+        cutoffs[day] = day_cutoff(parse_date(day), cutoff_hm, days_before, tz)
+        if cutoffs[day] >= first_start:
+            return await say(interaction, f"The cutoff for {day_label(day)} "
+                                          f"({discord.utils.format_dt(cutoffs[day], 'F')}) must be before that day's first slot. "
+                                          "Use a cutoff earlier in the day, or more days before.")
     try:
         db.create_run(guild_id=interaction.guild_id, name=name, fight_id=fight["id"], start_date=start,
-                      end_date=end, deadline_utc=deadline, slots=slots, created_by=interaction.user.id,
+                      end_date=end, cutoffs=cutoffs, slots=slots, created_by=interaction.user.id,
                       earliest=earliest_start, latest=latest_start, now=ctx.now())
     except DuplicateRun:
         return await say(interaction, f"A run called '{name}' already exists here.")
-    await say(interaction,
-              f"Created **{name}** for {fight['name']}: {(end - start).days + 1} days, {len(slots)} candidate slots. "
-              f"Signups would close {discord.utils.format_dt(deadline, 'F')}. It is a draft; use /run open to start signups.")
+    ordered = [cutoffs[d] for d in sorted(cutoffs)]
+    when = ("the evening before" if days_before == 1 else "the day itself" if days_before == 0
+            else f"{days_before} days before")
+    lines = [f"Created **{name}** for {fight['name']}: {len(cutoffs)} days, {len(slots)} candidate slots. "
+             f"Each day's signups close at {cutoff_hm.strftime('%H:%M')} ({tz}) {when}: the first is "
+             f"{discord.utils.format_dt(ordered[0], 'F')}, the last {discord.utils.format_dt(ordered[-1], 'F')}. "
+             "It is a draft; use /run open to start signups."]
+    if not ctx.cfg.get("reminder_channel_id"):
+        lines.append("⚠ No reminder channel is set (`reminder_channel_id` in config.json or REMINDER_CHANNEL_ID in .env), "
+                     "so the bot will not remind organizers to run /draft export after each cutoff.")
+    await say(interaction, "\n".join(lines))
 
 
 async def run_open(ctx, interaction, name=None):
@@ -130,18 +172,28 @@ async def run_open(ctx, interaction, name=None):
     if run["status"] == "open":
         return await say(interaction, f"**{run['name']}** is already open.")
     other = ctx.db.open_run(interaction.guild_id)
+    stale = ""
     if other:
-        return await say(interaction, f"**{other['name']}** is still open. Close it first with /run close.")
-    deadline = parse_iso(run["signup_deadline_utc"])
-    if ctx.now() >= deadline:
-        return await say(interaction, f"The signup deadline ({discord.utils.format_dt(deadline, 'F')}) has passed. "
-                                      "Create a new run with a later deadline.")
+        if open_days(ctx, other):
+            return await say(interaction, f"**{other['name']}** is still open. Close it first with /run close.")
+        ctx.db.set_run_status(other["id"], "closed")           # every day of it is past its cutoff anyway
+        stale = f" (I closed **{other['name']}**: all its days were already past their cutoffs.)"
+    rows = ctx.db.run_days(run["id"])
+    now = ctx.now()
+    still_open = [r for r in rows if now < cutoff_of(r)]
+    if not still_open:
+        return await say(interaction, "Every day of this run is already past its cutoff, so nobody could sign up. "
+                                      "Move a day with /run extend first.")
     ctx.db.set_run_status(run["id"], "open")
-    await say(interaction, f"**{run['name']}** is open. Players sign up with /availability until "
-                           f"{discord.utils.format_dt(deadline, 'F')}.")
+    nxt = discord.utils.format_dt(cutoff_of(still_open[0]), "F")
+    closed = len(rows) - len(still_open)
+    await say(interaction, f"**{run['name']}** is open. Players sign up with /availability; "
+                           f"{len(still_open)} of {len(rows)} days take signups"
+                           + (f" ({closed} already closed)" if closed else "")
+                           + f", the next cutoff is {day_label(still_open[0]['day'])}, {nxt}." + stale)
 
 
-async def run_close(ctx, interaction, name=None):
+async def run_close(ctx, interaction, name=None, day=None):
     if not await require_organizer(ctx, interaction):
         return
     run = await find_run(ctx, interaction, name)
@@ -149,10 +201,57 @@ async def run_close(ctx, interaction, name=None):
         return
     if run["status"] != "open":
         return await say(interaction, f"**{run['name']}** is not open.")
+    now = ctx.now()
+    if day:
+        row = await find_day(ctx, interaction, run, day)
+        if row is None:
+            return
+        if now >= cutoff_of(row):
+            return await say(interaction, f"{day_label(row['day'])} is already closed.")
+        ctx.db.set_cutoff(run["id"], row["day"], now)
+        return await say(interaction, f"Signups for {day_label(row['day'])} are closed now. "
+                                      f"Next: `/draft export day:{row['day']}`.")
+    for row in ctx.db.run_days(run["id"]):
+        if now < cutoff_of(row):
+            ctx.db.set_cutoff(run["id"], row["day"], now)
     ctx.db.set_run_status(run["id"], "closed")
     n = len({r["discord_id"] for r in ctx.db.tick_rows(run["id"])})
-    await say(interaction, f"**{run['name']}** is closed with {n} players signed up. "
-                           "Check /run status, then /draft export.")
+    await say(interaction, f"**{run['name']}** is closed for every day, with {n} players signed up. "
+                           "Check /run status, then /draft export for each day.")
+
+
+async def run_extend(ctx, interaction, day, new_cutoff, name=None, timezone=None):
+    """Move one day's cutoff (also reopens a day that already closed)."""
+    if not await require_organizer(ctx, interaction):
+        return
+    run = await find_run(ctx, interaction, name)
+    if run is None:
+        return
+    row = await find_day(ctx, interaction, run, day)
+    if row is None:
+        return
+    tz = timezone.strip() if timezone and timezone.strip() in available_timezones() else ctx.cfg["timezone"]
+    try:
+        cutoff = parse_local_datetime(new_cutoff, tz)
+    except ValueError:
+        return await say(interaction, f"The new cutoff looks like 2026-11-01 23:59 (time in {tz}). "
+                                      "You can also use today and tomorrow with a time.")
+    first = ctx.db.first_slot_start(run["id"], row["day"])
+    if cutoff >= first:
+        return await say(interaction, f"The cutoff must be before {day_label(row['day'])}'s first slot "
+                                      f"({discord.utils.format_dt(first, 'F')}).")
+    if cutoff <= ctx.now():
+        return await say(interaction, "That time has already passed. To close a day now use /run close with its day.")
+    if run["status"] == "closed":
+        other = ctx.db.open_run(interaction.guild_id)
+        if other and other["id"] != run["id"] and open_days(ctx, other):
+            return await say(interaction, f"**{other['name']}** is open; close it before reopening **{run['name']}**.")
+        ctx.db.set_run_status(run["id"], "open")
+    was_exported = bool(row["exported_utc"])
+    ctx.db.set_cutoff(run["id"], row["day"], cutoff, reset_export=True)
+    note = (" It had been exported, so export again after the new cutoff; the stored draft for that day stays "
+            "until you import a new one." if was_exported else "")
+    await say(interaction, f"Signups for {day_label(row['day'])} now close {discord.utils.format_dt(cutoff, 'F')}." + note)
 
 
 async def run_status(ctx, interaction, name=None, day=None):
@@ -161,12 +260,13 @@ async def run_status(ctx, interaction, name=None, day=None):
     run = await find_run(ctx, interaction, name)
     if run is None:
         return
+    key = None
     if day:
         try:
-            parse_date(day)
+            key = parse_day(day)
         except ValueError:
-            return await say(interaction, "The day looks like 2026-11-02.")
-    first, *rest = heatmap.render(ctx.db, run, ctx.cfg, day)
+            return await say(interaction, DAY_HINT)
+    first, *rest = heatmap.render(ctx.db, run, ctx.cfg, key, preface=day_summary_lines(ctx, run, key))
     await say(interaction, first)
     for msg in rest:
         await interaction.followup.send(msg, ephemeral=True)
@@ -235,38 +335,93 @@ async def myschedule(ctx, interaction):
 
 # ---------------------------------------------------------------- /draft
 
-async def draft_export(ctx, interaction, name=None):
+def _next_day_to_export(ctx, run):
+    """Earliest closed day that still waits for an export and has someone ready to play."""
+    for row in ctx.db.run_days(run["id"]):
+        if day_state(ctx, run, row) == "closed" and heatmap.day_summary(ctx.db, run, ctx.cfg, row["day"])[0]:
+            return row
+    return None
+
+
+async def draft_export(ctx, interaction, name=None, day=None, force=False):
     if not await require_organizer(ctx, interaction):
         return
     run = await find_run(ctx, interaction, name)
     if run is None:
         return
-    data, warnings = build_signups(ctx.db, run, ctx.cfg)
+    picked = ""
+    if day:
+        row = await find_day(ctx, interaction, run, day)
+        if row is None:
+            return
+    else:
+        row = _next_day_to_export(ctx, run)
+        if row is None:
+            lines = ["No closed day is waiting for an export (every closed day is exported or has nobody signed up)."]
+            lines += day_summary_lines(ctx, run)
+            lines.append("To export a day that is still open use `/draft export day:<day> force:true`.")
+            return await say(interaction, "\n".join(lines)[:1990])
+        picked = f"No day given, so I picked the earliest closed day not exported yet: {day_label(row['day'])}.\n"
+    day_key = row["day"]
+    state = day_state(ctx, run, row)
+    if state in ("open", "draft") and not force:
+        why = ("The run is still a draft." if state == "draft" else
+               f"Signups for {day_label(day_key)} are still open until {discord.utils.format_dt(cutoff_of(row), 'F')}.")
+        return await say(interaction, f"{why} Close it with `/run close day:{day_key}`, or pass `force:true` to export "
+                                      "anyway (the draft goes stale if anyone changes their signup afterwards).")
+
+    data, warnings = build_signups(ctx.db, run, ctx.cfg, day_key)
+    if not data["players"]:
+        lines = [f"Nobody is ready to play on {day_label(day_key)} (no one ticked slots with roles and prog set), "
+                 "so there is nothing to export."]
+        if warnings:
+            lines.append("Left out:\n" + "\n".join(f"• {w}" for w in warnings[:10]))
+        return await say(interaction, "\n".join(lines)[:1990])
     body = json.dumps(data, indent=1).encode()
     out_dir = Path(ctx.cfg["export_dir"])
     out_dir = out_dir if out_dir.is_absolute() else ROOT / out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"{slug(run['name'])}-signups.json"
+    filename = f"{slug(run['name'])}-{day_key}-signups.json"
     (out_dir / filename).write_bytes(body)
+    if state != "open":                         # a forced early export must not silence the reminders
+        ctx.db.mark_exported(run["id"], day_key, ctx.now())
 
-    lines = [f"Exported **{run['name']}**: {len(data['players'])} players, {len(data['slots'])} slots, "
-             f"fingerprint `{fingerprint(data)[:12]}`.",
+    lines = [picked + f"Exported **{run['name']}**, {day_label(day_key)}: {len(data['players'])} players, "
+             f"{len(data['slots'])} slots, fingerprint `{fingerprint(data)[:12]}`.",
              f"Also saved to {out_dir / filename}.",
-             f"Next: `python solve.py {filename} -o draft.json`, then /draft import with draft.json."]
-    if run["status"] == "open":
-        lines.append("⚠ Signups are still open. Any change after this export makes the draft stale, and import will refuse it.")
+             f"Next: `python solve.py {filename} -o draft.json`, then /draft import with draft.json (day:{day_key} if it asks)."]
+    if state == "open":
+        lines.append("⚠ Signups for that day are still open. Any change after this export makes the draft stale, "
+                     "and import will refuse it. Reminders will still come after the cutoff.")
     if warnings:
         lines.append("Left out:\n" + "\n".join(f"• {w}" for w in warnings[:10])
                      + (f"\n… and {len(warnings) - 10} more" if len(warnings) > 10 else ""))
     await say(interaction, "\n".join(lines)[:1990], file=discord.File(io.BytesIO(body), filename=filename))
 
 
-async def draft_import(ctx, interaction, draft_file, name=None):
+def _day_of_draft(ctx, run, draft):
+    """Which exported day a draft file belongs to, found by matching its fingerprint to each day's export."""
+    exported = sorted((r for r in ctx.db.run_days(run["id"]) if r["exported_utc"]),
+                      key=lambda r: r["exported_utc"], reverse=True)
+    for row in exported:
+        data, _ = build_signups(ctx.db, run, ctx.cfg, row["day"])
+        if fingerprint(data) == draft.get("input_fingerprint"):
+            return row["day"]
+    return exported[0]["day"] if exported else None      # none match: report staleness for the latest export
+
+
+async def draft_import(ctx, interaction, draft_file, name=None, day=None):
     if not await require_organizer(ctx, interaction):
         return
     run = await find_run(ctx, interaction, name)
     if run is None:
         return
+    day_key = None
+    if day:
+        row = await find_day(ctx, interaction, run, day)
+        if row is None:
+            return
+        day_key = row["day"]
     if draft_file.size > MAX_DRAFT_BYTES:
         return await say(interaction, "That file is too large to be a draft.")
     await interaction.response.defer(ephemeral=True)
@@ -274,13 +429,16 @@ async def draft_import(ctx, interaction, draft_file, name=None):
         draft = json.loads(await draft_file.read())
     except (ValueError, UnicodeDecodeError):
         return await say(interaction, "That file is not valid JSON.")
+    if day_key is None and isinstance(draft, dict):
+        day_key = _day_of_draft(ctx, run, draft)
     try:
-        s = import_draft(ctx.db, run, draft, ctx.cfg)
+        s = import_draft(ctx.db, run, draft, ctx.cfg, day_key)
     except DraftError as e:
         return await say(interaction, f"Draft refused: {e}")
     except DraftConflict:
-        return await say(interaction, "This run already has confirmed parties, so a new draft cannot replace them.")
-    lines = [f"Draft stored for **{run['name']}** (status: draft, nothing is posted to players): "
+        return await say(interaction, "That day already has confirmed parties, so a new draft cannot replace them.")
+    lines = [f"Draft stored for **{run['name']}**{', ' + day_label(day_key) if day_key else ''} "
+             f"(status: draft, nothing is posted to players): "
              f"{s['parties']} parties in {s['slots']} slots, {s['seated']} players seated, "
              f"{s['no_party']} without a party, {s['placed_down']} placed below their prog."]
     for _, slot, reason in s["slot_notes"][:5]:

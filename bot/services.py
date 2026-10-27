@@ -1,6 +1,6 @@
 """Shared pieces for command handlers and the signup views."""
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Callable
 from zoneinfo import ZoneInfo
 
@@ -21,14 +21,79 @@ class Ctx:
     now: Callable[[], datetime] = field(default=lambda: datetime.now(timezone.utc))
 
 
-def signup_open(ctx, run):
-    """(True, '') when players may change their signup, else (False, reason)."""
+def day_label(day):
+    """'2026-11-02' -> 'Mon 02 Nov'"""
+    return date.fromisoformat(day).strftime("%a %d %b")
+
+
+def cutoff_of(day_row):
+    return parse_iso(day_row["cutoff_utc"])
+
+
+def day_state(ctx, run, day_row):
+    """'draft' (run not opened), 'open', 'closed' (signups over, not exported) or 'exported'."""
+    if day_row["exported_utc"]:
+        return "exported"
+    if run["status"] == "draft":
+        return "draft"
+    if run["status"] != "open" or ctx.now() >= cutoff_of(day_row):
+        return "closed"
+    return "open"
+
+
+def day_accepts_signups(ctx, run, day_row):
+    """Players may change this day's ticks: the run is open and the day's cutoff has not passed.
+
+    Deliberately independent of the export mark, so a day exported early with force can still change
+    until its cutoff (the draft then goes stale and import refuses it).
+    """
+    return run["status"] == "open" and ctx.now() < cutoff_of(day_row)
+
+
+def open_days(ctx, run):
+    return [d for d in ctx.db.run_days(run["id"]) if day_accepts_signups(ctx, run, d)]
+
+
+def signup_open(ctx, run, day=None):
+    """(True, '') when players may change their signup, else (False, reason).
+
+    Without `day`: is any day of the run still taking signups (roles, prog and limits are per player,
+    so they only need one open day). With `day`: is that specific day open.
+    """
     if run["status"] != "open":
         return False, "Signups for this run are not open."
-    deadline = parse_iso(run["signup_deadline_utc"])
-    if ctx.now() >= deadline:
-        return False, f"Signups closed {discord.utils.format_dt(deadline, 'F')}."
+    if day is None:
+        if open_days(ctx, run):
+            return True, ""
+        return False, "Signups are closed for every day of this run."
+    row = ctx.db.run_day(run["id"], day)
+    if row is None:
+        return False, "That day is not part of this run."
+    if not day_accepts_signups(ctx, run, row):
+        return False, f"Signups for {day_label(day)} closed {discord.utils.format_dt(cutoff_of(row), 'F')}."
     return True, ""
+
+
+def day_summary_lines(ctx, run, only_day=None):
+    """One line per day: its state and cutoff (Discord timestamps show in each viewer's local time)."""
+    lines = []
+    for row in ctx.db.run_days(run["id"]):
+        if only_day and row["day"] != only_day:
+            continue
+        state = day_state(ctx, run, row)
+        cutoff = discord.utils.format_dt(cutoff_of(row), "R")
+        when = {"open": f"open, closes {cutoff}", "draft": f"not open yet, would close {cutoff}",
+                "closed": f"closed {cutoff}, not exported yet", "exported": f"exported (cutoff {cutoff})"}[state]
+        lines.append(f"{day_label(row['day'])}: {when}")
+    return lines
+
+
+def clip_message(text, limit=1990):
+    """Cut a message to Discord's length limit at a line break, so a timestamp token is never split."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    return cut[:cut.rfind("\n")] if "\n" in cut else cut
 
 
 def validate_limits(per_day, per_run, drop, n_checkpoints):

@@ -67,8 +67,20 @@ def slot_table(db, run, cfg):
     return table
 
 
-def render(db, run, cfg, day=None):
-    """The heatmap as a list of messages, each under the Discord length limit."""
+def day_summary(db, run, cfg, day):
+    """For one day: (players who finished roles and prog, players who still need to, slots that could fill)."""
+    ticks = [r for r in db.tick_rows(run["id"]) if r["slot_key"][:10] == day]
+    ready = {r["discord_id"] for r in ticks if split_roles(r["roles"]) and r["prog_index"] is not None}
+    incomplete = {r["discord_id"] for r in ticks} - ready
+    fillable = sum(1 for row in slot_table(db, run, cfg) if row["key"][:10] == day and row["parties"] > 0)
+    return len(ready), len(incomplete), fillable
+
+
+def render(db, run, cfg, day=None, preface=None):
+    """The heatmap as a list of messages, each under the Discord length limit.
+
+    `preface` (a list of lines, e.g. each day's cutoff and state) goes under the headline.
+    """
     table = slot_table(db, run, cfg)
     ticks = db.tick_rows(run["id"])
     signed = {r["discord_id"] for r in ticks}
@@ -78,6 +90,8 @@ def render(db, run, cfg, day=None):
             + (f", {len(incomplete)} still need roles or prog" if incomplete else "") + ".",
             f"Times are {cfg['timezone']}. T/H/D = ticked players who can play that role (flex players count in each). "
             "\"fill\" = full parties the role mix could support, ignoring prog and limits; `--` = cannot fill."]
+    if preface:
+        head = head[:1] + list(preface) + head[1:]
     days = defaultdict(list)
     for row in table:
         days[row["key"][:10]].append(row)

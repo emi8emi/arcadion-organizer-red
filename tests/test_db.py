@@ -128,3 +128,24 @@ def test_previous_unmatched_lists_ticked_players_without_a_party(ctx, make_run):
     new = make_run("New")
     assert ctx.db.previous_unmatched(new) == {"99"}
     assert ctx.db.previous_unmatched(old) == set()                 # no earlier run
+
+
+def test_replace_draft_with_a_day_keeps_other_days_and_their_notes(ctx, make_run):
+    run = make_run()
+    ids = fill_one_party(ctx, run, "2026-11-01T17:00")
+    ctx.db.replace_draft(run["id"], [_party("2026-11-01T17:00", 0, ids), _party("2026-11-02T17:00", 0, ids)],
+                         [("slot", "2026-11-01T18:30", "d1 note"), ("slot", "2026-11-02T18:30", "d2 note")])
+    ctx.db.replace_draft(run["id"], [], [("slot", "2026-11-02T20:00", "new d2 note")], day="2026-11-02")
+    assert [p["slot_key"] for p in ctx.db.parties(run["id"])] == ["2026-11-01T17:00"]
+    assert sorted(n["ref"] for n in ctx.db.draft_notes(run["id"])) == ["2026-11-01T18:30", "2026-11-02T20:00"]
+
+
+def test_replace_draft_with_a_day_ignores_confirmed_parties_on_other_days(ctx, make_run):
+    run = make_run()
+    ids = fill_one_party(ctx, run, "2026-11-01T17:00")
+    ctx.db.replace_draft(run["id"], [_party("2026-11-01T17:00", 0, ids)], [])
+    with ctx.db.conn:
+        ctx.db.conn.execute("UPDATE parties SET status = 'confirmed'")
+    ctx.db.replace_draft(run["id"], [_party("2026-11-02T17:00", 0, ids)], [], day="2026-11-02")
+    with pytest.raises(DraftConflict):
+        ctx.db.replace_draft(run["id"], [], [], day="2026-11-01")

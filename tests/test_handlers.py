@@ -9,13 +9,13 @@ from bot import handlers
 from bot.db import split_roles
 from bot.solver_io import build_signups, import_draft
 from bot.views import AvailabilityView, DoneButton, LimitsButton
-from conftest import (NOW, ORGANIZER_ROLE_ID, SLOT, FakeAttachment, add_player, draft_for, fill_one_party,
+from conftest import (add_party_players, draft_for_day, NOW, ORGANIZER_ROLE_ID, SLOT, FakeAttachment, add_player, draft_for, fill_one_party,
                       organizer, player, run_async)
 
 
 def create_args(**kw):
     args = dict(name="UWU week 1", content="Ultima Weapon (Ultimate)", start_date="2026-11-01",
-                end_date="2026-11-03", signup_deadline="2026-10-30 18:00")
+                end_date="2026-11-03")
     args.update(kw)
     return args
 
@@ -59,6 +59,48 @@ def test_run_create_builds_the_slot_grid(ctx):
     assert len(ctx.db.run_slots(run["id"])) == 33
 
 
+def test_run_create_sets_one_cutoff_per_day_the_evening_before(ctx):
+    do(ctx, handlers.run_create, organizer(), **create_args())
+    run = ctx.db.get_run(100, "uwu week 1")
+    # 23:59 Eastern the evening before; 2026-11-01 is the day the clocks fall back (EDT before it, EST after)
+    assert {d["day"]: d["cutoff_utc"] for d in ctx.db.run_days(run["id"])} == {
+        "2026-11-01": "2026-11-01T03:59:00+00:00",     # Oct 31 23:59 EDT
+        "2026-11-02": "2026-11-02T04:59:00+00:00",     # Nov 1 23:59 EST
+        "2026-11-03": "2026-11-03T04:59:00+00:00"}
+
+
+def test_run_create_cutoff_options(ctx):
+    do(ctx, handlers.run_create, organizer(), **create_args(cutoff_time="20:30", cutoff_days_before=2))
+    run = ctx.db.get_run(100, "uwu week 1")
+    assert ctx.db.run_day(run["id"], "2026-11-03")["cutoff_utc"] == "2026-11-02T01:30:00+00:00"   # Nov 1 20:30 EST
+    it = do(ctx, handlers.run_create, organizer(), **create_args(name="Same day", cutoff_time="07:00",
+                                                                  cutoff_days_before=0))
+    assert "the day itself" in it.text
+    assert ctx.db.run_day(ctx.db.get_run(100, "same day")["id"], "2026-11-02")["cutoff_utc"] == "2026-11-02T12:00:00+00:00"
+
+
+def test_run_create_cutoff_can_use_another_timezone(ctx):
+    do(ctx, handlers.run_create, organizer(), **create_args(timezone="America/Sao_Paulo"))
+    run = ctx.db.get_run(100, "uwu week 1")
+    assert ctx.db.run_day(run["id"], "2026-11-02")["cutoff_utc"] == "2026-11-02T02:59:00+00:00"   # Nov 1 23:59 BRT (UTC-3)
+
+
+def test_run_create_allows_tomorrow_with_tonights_cutoff(ctx):
+    from datetime import date as _date
+    tomorrow = (_date.today() + timedelta(days=1)).isoformat()
+    it = do(ctx, handlers.run_create, organizer(),
+            **create_args(start_date="tomorrow", end_date="tomorrow"))
+    assert "Created" in it.text and "1 days" in it.text
+    run = ctx.db.get_run(100, "uwu week 1")
+    assert [d["day"] for d in ctx.db.run_days(run["id"])] == [tomorrow]
+
+
+def test_run_create_warns_when_no_reminder_channel_is_set(ctx):
+    assert "No reminder channel" in do(ctx, handlers.run_create, organizer(), **create_args()).text
+    ctx.cfg["reminder_channel_id"] = 123
+    assert "No reminder channel" not in do(ctx, handlers.run_create, organizer(), **create_args(name="B")).text
+
+
 def test_run_create_can_limit_the_candidate_slots(ctx):
     it = do(ctx, handlers.run_create, organizer(), **create_args(earliest_start="17:00", latest_start="20:00"))
     assert "9 candidate slots" in it.text
@@ -70,8 +112,9 @@ def test_run_create_rejects_bad_input(ctx, make_run):
         (dict(start_date="11/01/2026"), "Dates look like"),
         (dict(end_date="2026-10-30"), "end date is before"),
         (dict(end_date="2026-12-30"), "at most 14 days"),
-        (dict(signup_deadline="abc"), "deadline looks like"),
-        (dict(signup_deadline="2026-11-02 09:00"), "before the first slot"),
+        (dict(cutoff_time="abc"), "cutoff time looks like"),
+        (dict(cutoff_days_before=9), "between 0"),
+        (dict(cutoff_days_before=0), "before that day's first slot"),       # 23:59 on the day itself
         (dict(earliest_start="5pm"), "look like 17:00"),
         (dict(name=" "), "name of 1 to 60"),
         (dict(earliest_start="23:30", latest_start="23:45"), "no slots"),
@@ -98,14 +141,14 @@ def test_open_and_close_lifecycle(ctx, make_run):
     it = do(ctx, handlers.run_close, organizer())              # newest run is "Second", which is not open
     assert "is not open" in it.text
     it = do(ctx, handlers.run_close, organizer(), "UWU week 1")
-    assert "closed with 1 players" in it.text and ctx.db.run(run["id"])["status"] == "closed"
+    assert "closed for every day, with 1 players" in it.text and ctx.db.run(run["id"])["status"] == "closed"
     assert ctx.db.run(second["id"])["status"] == "draft"
 
 
 def test_open_refuses_after_the_deadline(ctx, make_run, clock):
     make_run(status="draft")
     clock["now"] = NOW + timedelta(days=10)
-    assert "has passed" in do(ctx, handlers.run_open, organizer()).text
+    assert "past its cutoff" in do(ctx, handlers.run_open, organizer()).text
 
 
 def test_unknown_run_name(ctx):
@@ -119,7 +162,7 @@ def test_run_status_shows_the_heatmap(ctx, make_run):
     it = do(ctx, handlers.run_status, organizer())
     assert "8 players have ticked slots" in it.text and "17:00   2  2  4    8  ✓ ~1" in it.text
     assert it.response.sent[0]["ephemeral"] is True
-    assert "day looks like" in do(ctx, handlers.run_status, organizer(), None, "bad").text
+    assert "Days look like" in do(ctx, handlers.run_status, organizer(), None, "bad").text
 
 
 def test_run_status_sends_extra_messages_for_long_runs(ctx, make_run):
@@ -138,7 +181,7 @@ def test_availability_needs_an_open_run(ctx, make_run, clock):
     assert "No run is open" in do(ctx, handlers.availability, player(5)).text
     make_run()
     clock["now"] = NOW + timedelta(days=10)
-    assert "Signups closed" in do(ctx, handlers.availability, player(5)).text
+    assert "closed for every day" in do(ctx, handlers.availability, player(5)).text
 
 
 def test_availability_rejects_unknown_timezone(ctx, make_run):
@@ -160,7 +203,7 @@ def test_menu_saves_every_click(ctx, make_run):
         assert len(view.children) == 6
         assert [o.value for o in view.prog_select.options] == [str(i) for i in range(19)]
         assert [o.value for o in view.day_select.options] == ["2026-11-01", "2026-11-02", "2026-11-03"]
-        assert "⚠ Set your roles and prog" in msg["content"] and msg["content"].count("<t:") == 1   # only the deadline
+        assert "⚠ Set your roles and prog" in msg["content"] and msg["content"].count("<t:") == 4   # the picked day's cutoff plus one per day
 
         view.role_select._values = ["dps", "tank"]
         await view.role_select.callback(player(5))
@@ -245,7 +288,7 @@ def test_menu_stops_saving_after_the_deadline(ctx, make_run, clock):
         late = player(5)
         view.role_select._values = ["tank"]
         await view.role_select.callback(late)
-        assert "Signups closed" in late.text and late.response.edits[-1]["view"] is None
+        assert "closed for every day" in late.text and late.response.edits[-1]["view"] is None
         assert ctx.db.get_player(5)["roles"] == ""
     run_async(scenario())
 
@@ -273,7 +316,7 @@ def test_limits_command_needs_an_open_run(ctx, make_run, clock):
     assert "No run is open" in do(ctx, handlers.limits, player(5)).text
     make_run()
     clock["now"] = NOW + timedelta(days=10)
-    assert "Signups closed" in do(ctx, handlers.limits, player(5), 3).text
+    assert "closed for every day" in do(ctx, handlers.limits, player(5), 3).text
 
 
 def test_myschedule_shows_ticks_and_only_confirmed_parties(ctx, make_run):
@@ -304,21 +347,39 @@ def test_export_attaches_and_saves_the_solver_input(ctx, make_run, cfg):
     fill_one_party(ctx, run, SLOT)
     it = do(ctx, handlers.draft_export, organizer())
     msg = it.response.sent[0]
-    assert "Exported **UWU week 1**: 8 players, 33 slots" in msg["content"] and "fingerprint" in msg["content"]
+    assert "picked the earliest closed day not exported yet: Mon 02 Nov" in msg["content"]
+    assert "Exported **UWU week 1**, Mon 02 Nov: 8 players, 11 slots" in msg["content"] and "fingerprint" in msg["content"]
     assert "still open" not in msg["content"]
-    assert isinstance(msg["file"], discord.File) and msg["file"].filename == "uwu-week-1-signups.json"
-    saved = json.loads((handlers.Path(cfg["export_dir"]) / "uwu-week-1-signups.json").read_text())
-    assert saved == build_signups(ctx.db, run, ctx.cfg)[0]
+    name = "uwu-week-1-2026-11-02-signups.json"
+    assert isinstance(msg["file"], discord.File) and msg["file"].filename == name
+    saved = json.loads((handlers.Path(cfg["export_dir"]) / name).read_text())
+    assert saved == build_signups(ctx.db, run, ctx.cfg, "2026-11-02")[0]
     assert json.loads(msg["file"].fp.read()) == saved
+    assert ctx.db.run_day(run["id"], "2026-11-02")["exported_utc"] is not None
 
 
-def test_export_warns_about_open_runs_and_skipped_players(ctx, make_run):
+def test_export_refuses_an_open_day_unless_forced(ctx, make_run):
     run = make_run(status="open")
     fill_one_party(ctx, run, SLOT)
     ctx.db.upsert_player(50, "No Profile")
     ctx.db.set_day_availability(run["id"], 50, "2026-11-02", [SLOT])
-    text = do(ctx, handlers.draft_export, organizer()).text
-    assert "Signups are still open" in text and "No Profile" in text and "8 players" in text
+
+    assert "No closed day is waiting" in do(ctx, handlers.draft_export, organizer()).text
+    refused = do(ctx, handlers.draft_export, organizer(), None, "2026-11-02").text
+    assert "still open" in refused and "force:true" in refused and not ctx.db.run_day(run["id"], "2026-11-02")["exported_utc"]
+
+    text = do(ctx, handlers.draft_export, organizer(), None, "2026-11-02", True).text
+    assert "Signups for that day are still open" in text and "No Profile" in text and "8 players" in text
+    # a forced early export must not silence the reminders that follow the cutoff
+    assert ctx.db.run_day(run["id"], "2026-11-02")["exported_utc"] is None
+
+
+def test_export_day_errors(ctx, make_run):
+    run = make_run(status="closed")
+    assert "Days look like" in do(ctx, handlers.draft_export, organizer(), None, "bad").text
+    assert "not a day of" in do(ctx, handlers.draft_export, organizer(), None, "2026-12-25").text
+    assert "Nobody is ready" in do(ctx, handlers.draft_export, organizer(), None, "2026-11-02").text
+    assert ctx.db.run_day(run["id"], "2026-11-02")["exported_utc"] is None
 
 
 def test_import_stores_a_draft(ctx, make_run):
@@ -358,6 +419,20 @@ def test_import_refuses_to_replace_confirmed_parties(ctx, make_run):
     with ctx.db.conn:
         ctx.db.conn.execute("UPDATE parties SET status = 'confirmed'")
     assert "already has confirmed parties" in do(ctx, handlers.draft_import, organizer(), FakeAttachment(body)).text
+
+
+def test_import_finds_the_day_from_the_fingerprint(ctx, make_run):
+    run = make_run(status="closed", per_day=True)
+    ids = add_party_players(ctx, run, ["2026-11-01T17:00", SLOT])
+    for day in ("2026-11-01", "2026-11-02"):
+        do(ctx, handlers.draft_export, organizer(), None, day)
+    body = json.dumps(draft_for_day(ctx, run, "2026-11-01", "2026-11-01T17:00", ids)).encode()
+    it = do(ctx, handlers.draft_import, organizer(), FakeAttachment(body))
+    assert "Draft stored" in it.text
+    assert [p["slot_key"] for p in ctx.db.parties(run["id"])] == ["2026-11-01T17:00"]
+    other = json.dumps(draft_for_day(ctx, run, "2026-11-02", SLOT, ids)).encode()
+    assert "Draft stored" in do(ctx, handlers.draft_import, organizer(), FakeAttachment(other)).text
+    assert len(ctx.db.parties(run["id"])) == 2          # the second import did not wipe the first day
 
 
 # ---------------------------------------------------------------- /helper

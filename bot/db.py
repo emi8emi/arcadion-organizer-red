@@ -42,7 +42,27 @@ class DB:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.executescript(SCHEMA_PATH.read_text())
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self):
+        """Bring a database made before per-day cutoffs up to date. Safe to run on every start.
+
+        Runs without run_days rows get one row per day (taken from their slots) using the run's old
+        signup_deadline_utc as every day's cutoff. A day that already has parties in the database counts
+        as exported, so old runs do not trigger export reminders.
+        """
+        with self.conn:
+            self.conn.execute(
+                """INSERT OR IGNORE INTO run_days (run_id, day, cutoff_utc, exported_utc)
+                   SELECT r.id, substr(s.slot_key, 1, 10), r.signup_deadline_utc,
+                          CASE WHEN EXISTS (SELECT 1 FROM parties p JOIN slots ps ON ps.id = p.slot_id
+                                            WHERE p.run_id = r.id
+                                              AND substr(ps.slot_key, 1, 10) = substr(s.slot_key, 1, 10))
+                               THEN r.created_utc END
+                   FROM runs r JOIN slots s ON s.run_id = r.id
+                   WHERE r.id NOT IN (SELECT run_id FROM run_days)
+                   GROUP BY r.id, substr(s.slot_key, 1, 10)""")
 
     def close(self):
         self.conn.close()
@@ -72,8 +92,10 @@ class DB:
 
     # ------------------------------------------------------------ runs
 
-    def create_run(self, *, guild_id, name, fight_id, start_date, end_date, deadline_utc, slots,
+    def create_run(self, *, guild_id, name, fight_id, start_date, end_date, cutoffs, slots,
                    created_by, earliest=None, latest=None, now):
+        """`cutoffs` maps each day ('2026-11-02') to the UTC datetime its signups close."""
+        legacy_deadline = max(cutoffs.values())            # only kept so old code and old databases still make sense
         try:
             with self.conn:
                 cur = self.conn.execute(
@@ -81,11 +103,14 @@ class DB:
                                          latest_start, signup_deadline_utc, status, created_by, created_utc)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)""",
                     (str(guild_id), name, fight_id, str(start_date), str(end_date), earliest, latest,
-                     iso(deadline_utc), str(created_by), iso(now)))
+                     iso(legacy_deadline), str(created_by), iso(now)))
                 run_id = cur.lastrowid
                 self.conn.executemany(
                     "INSERT INTO slots (run_id, slot_key, start_utc, minutes) VALUES (?, ?, ?, ?)",
                     [(run_id, s.key, iso(s.start_utc), s.minutes) for s in slots])
+                self.conn.executemany(
+                    "INSERT INTO run_days (run_id, day, cutoff_utc) VALUES (?, ?, ?)",
+                    [(run_id, day, iso(cutoff)) for day, cutoff in sorted(cutoffs.items())])
         except sqlite3.IntegrityError as e:
             if "runs.guild_id" in str(e) or "UNIQUE" in str(e):
                 raise DuplicateRun(name) from e
@@ -116,6 +141,62 @@ class DB:
     def run_slots(self, run_id):
         return self.conn.execute(
             "SELECT * FROM slots WHERE run_id = ? ORDER BY start_utc", (run_id,)).fetchall()
+
+    def slots_on(self, run_id, day):
+        return self.conn.execute(
+            "SELECT * FROM slots WHERE run_id = ? AND substr(slot_key, 1, 10) = ? ORDER BY start_utc",
+            (run_id, day)).fetchall()
+
+    # ------------------------------------------------------------ days (per-day cutoffs)
+
+    def run_days(self, run_id):
+        return self.conn.execute("SELECT * FROM run_days WHERE run_id = ? ORDER BY day", (run_id,)).fetchall()
+
+    def run_day(self, run_id, day):
+        return self.conn.execute(
+            "SELECT * FROM run_days WHERE run_id = ? AND day = ?", (run_id, day)).fetchone()
+
+    def set_cutoff(self, run_id, day, cutoff_utc, *, reset_export=False):
+        """Move one day's cutoff. `reset_export` forgets the export and reminders (the day reopened)."""
+        with self.conn:
+            self.conn.execute("UPDATE run_days SET cutoff_utc = ? WHERE run_id = ? AND day = ?",
+                              (iso(cutoff_utc), run_id, day))
+            if reset_export:
+                self.conn.execute("UPDATE run_days SET exported_utc = NULL, last_reminded_utc = NULL "
+                                  "WHERE run_id = ? AND day = ?", (run_id, day))
+
+    def mark_exported(self, run_id, day, now):
+        with self.conn:
+            self.conn.execute("UPDATE run_days SET exported_utc = ? WHERE run_id = ? AND day = ?",
+                              (iso(now), run_id, day))
+
+    def mark_reminded(self, run_id, day, now):
+        with self.conn:
+            self.conn.execute("UPDATE run_days SET last_reminded_utc = ? WHERE run_id = ? AND day = ?",
+                              (iso(now), run_id, day))
+
+    def first_slot_start(self, run_id, day):
+        """UTC start of the day's first slot, or None."""
+        row = self.conn.execute(
+            "SELECT MIN(start_utc) AS t FROM slots WHERE run_id = ? AND substr(slot_key, 1, 10) = ?",
+            (run_id, day)).fetchone()
+        return parse_iso(row["t"]) if row and row["t"] else None
+
+    def reminder_candidates(self, now):
+        """Days that might need an export reminder: runs that were opened, cutoff passed, not exported yet."""
+        return self.conn.execute(
+            """SELECT d.*, r.guild_id, r.name AS run_name FROM run_days d JOIN runs r ON r.id = d.run_id
+               WHERE r.status IN ('open', 'closed') AND d.exported_utc IS NULL AND d.cutoff_utc <= ?
+               ORDER BY d.cutoff_utc, r.id, d.day""", (iso(now),)).fetchall()
+
+    def played_counts(self, run_id, before_day):
+        """Parties each player has in this run on days strictly before `before_day` (any draft or confirmed status)."""
+        rows = self.conn.execute(
+            """SELECT m.discord_id, COUNT(*) AS n
+               FROM party_members m JOIN parties p ON p.id = m.party_id JOIN slots s ON s.id = p.slot_id
+               WHERE p.run_id = ? AND substr(s.slot_key, 1, 10) < ? GROUP BY m.discord_id""",
+            (run_id, before_day)).fetchall()
+        return {r["discord_id"]: r["n"] for r in rows}
 
     # ------------------------------------------------------------ players
 
@@ -224,12 +305,28 @@ class DB:
 
     # ------------------------------------------------------------ parties / drafts
 
-    def previous_unmatched(self, run):
-        """Players who ticked slots in the previous run of this fight but got no party there.
+    def previous_unmatched(self, run, day=None):
+        """Players who ticked slots last time but got no party. Used for the solver's priority bonus.
 
-        Derived from stored data only, so exporting the same run twice gives the same input
+        With `day`, "last time" is the latest earlier day of the same run that has a stored draft. Without
+        one (or when no earlier day has a draft) it is the previous run of this fight.
+
+        Derived from stored data only, so exporting the same day twice gives the same input
         (which keeps the draft fingerprint stable).
         """
+        if day:
+            prev = self.conn.execute(
+                """SELECT MAX(substr(s.slot_key, 1, 10)) AS d FROM parties p JOIN slots s ON s.id = p.slot_id
+                   WHERE p.run_id = ? AND substr(s.slot_key, 1, 10) < ?""", (run["id"], day)).fetchone()["d"]
+            if prev:
+                ticked = {r["discord_id"] for r in self.conn.execute(
+                    """SELECT DISTINCT a.discord_id FROM availability a JOIN slots s ON s.id = a.slot_id
+                       WHERE a.run_id = ? AND substr(s.slot_key, 1, 10) = ?""", (run["id"], prev))}
+                seated = {r["discord_id"] for r in self.conn.execute(
+                    """SELECT DISTINCT m.discord_id FROM party_members m JOIN parties p ON p.id = m.party_id
+                       JOIN slots s ON s.id = p.slot_id
+                       WHERE p.run_id = ? AND substr(s.slot_key, 1, 10) = ?""", (run["id"], prev))}
+                return ticked - seated
         prev = self.conn.execute(
             """SELECT r.id FROM runs r
                WHERE r.guild_id = ? AND r.fight_id = ? AND r.id < ?
@@ -244,19 +341,32 @@ class DB:
                WHERE p.run_id = ?""", (prev["id"],))}
         return ticked - seated
 
-    def replace_draft(self, run_id, parties, notes):
+    def replace_draft(self, run_id, parties, notes, day=None):
         """Swap in a new draft. `parties`: [{slot_key, party_index, target_idx, members: [...]}].
 
-        Refuses if any party of the run is already confirmed or done.
+        With `day`, only that day's draft parties (and notes) are replaced; other days are untouched.
+        Refuses if any party already in scope is confirmed or done.
         """
         slot_ids = {r["slot_key"]: r["id"] for r in self.run_slots(run_id)}
+        in_day = "AND slot_id IN (SELECT id FROM slots WHERE run_id = ? AND substr(slot_key, 1, 10) = ?)"
+        scope = (run_id, run_id, day) if day else (run_id,)
         with self.conn:
             locked = self.conn.execute(
-                "SELECT COUNT(*) FROM parties WHERE run_id = ? AND status != 'draft'", (run_id,)).fetchone()[0]
+                f"SELECT COUNT(*) FROM parties WHERE run_id = ? AND status != 'draft' {in_day if day else ''}",
+                scope).fetchone()[0]
             if locked:
                 raise DraftConflict()
-            self.conn.execute("DELETE FROM parties WHERE run_id = ? AND status = 'draft'", (run_id,))
-            self.conn.execute("DELETE FROM draft_notes WHERE run_id = ?", (run_id,))
+            self.conn.execute(
+                f"DELETE FROM parties WHERE run_id = ? AND status = 'draft' {in_day if day else ''}", scope)
+            if day:
+                self.conn.execute("DELETE FROM draft_notes WHERE run_id = ? AND kind = 'slot' "
+                                  "AND substr(ref, 1, 10) = ?", (run_id, day))
+                self.conn.execute(
+                    """DELETE FROM draft_notes WHERE run_id = ? AND kind = 'player' AND ref IN
+                       (SELECT a.discord_id FROM availability a JOIN slots s ON s.id = a.slot_id
+                        WHERE a.run_id = ? AND substr(s.slot_key, 1, 10) = ?)""", (run_id, run_id, day))
+            else:
+                self.conn.execute("DELETE FROM draft_notes WHERE run_id = ?", (run_id,))
             for pa in parties:
                 cur = self.conn.execute(
                     "INSERT INTO parties (run_id, slot_id, party_index, status, target_idx) VALUES (?, ?, ?, 'draft', ?)",

@@ -1,11 +1,10 @@
 """The /availability menu: roles, prog checkpoint, day, slots, limits. Every click saves at once."""
-from datetime import date
-
 import discord
 
 from .config import ROLES
 from .db import parse_iso, split_roles
-from .services import checkpoint_label, profile_text, signup_open, tick_lines, validate_limits
+from .services import (checkpoint_label, clip_message, day_accepts_signups, day_label, day_state, cutoff_of,
+                       profile_text, signup_open, tick_lines, validate_limits)
 
 
 class AvailabilityView(discord.ui.View):
@@ -16,7 +15,8 @@ class AvailabilityView(discord.ui.View):
         self.checkpoints = ctx.db.checkpoints(run["fight_id"])
         self.slots = ctx.db.run_slots(run["id"])
         self.days = sorted({s["slot_key"][:10] for s in self.slots})
-        self.day = self.days[0]
+        self.day = next((d["day"] for d in ctx.db.run_days(run["id"])
+                         if day_accepts_signups(ctx, run, d)), self.days[0])     # first day still open
 
         self.role_select = RoleSelect()
         self.prog_select = ProgSelect()
@@ -47,9 +47,11 @@ class AvailabilityView(discord.ui.View):
             discord.SelectOption(label=checkpoint_label(self.checkpoints, c["idx"])[:100], value=str(c["idx"]),
                                  default=(c["idx"] == prog)) for c in self.checkpoints[:25]]
         per_day = {d: sum(k[:10] == d for k in ticked) for d in self.days}
+        run = self.run
+        rows = {r["day"]: r for r in db.run_days(self.run_id)}
         self.day_select.options = [
-            discord.SelectOption(label=date.fromisoformat(d).strftime("%a %d %b"), value=d,
-                                 description=f"{per_day[d]} ticked", default=(d == self.day))
+            discord.SelectOption(label=day_label(d), value=d, description=self._day_description(run, rows[d], per_day[d]),
+                                 default=(d == self.day))
             for d in self.days[:25]]
         tz_name = self.ctx.cfg["timezone"]
         day_slots = [s for s in self.slots if s["slot_key"][:10] == self.day][:25]
@@ -58,7 +60,18 @@ class AvailabilityView(discord.ui.View):
                 label=parse_iso(s["start_utc"]).astimezone(self._zone()).strftime("%H:%M %Z"),
                 value=s["slot_key"], default=(s["slot_key"] in ticked)) for s in day_slots]
         self.slot_select.max_values = max(1, len(day_slots))
-        self.slot_select.placeholder = f"Slots you can play on {date.fromisoformat(self.day).strftime('%a %d %b')} ({tz_name})"
+        day_open = day_accepts_signups(self.ctx, run, rows[self.day])
+        self.slot_select.disabled = not day_open                  # a closed day keeps its ticks, read-only
+        self.slot_select.placeholder = (f"Slots you can play on {day_label(self.day)} ({tz_name})" if day_open
+                                        else f"{day_label(self.day)} is closed: its slots are locked")
+
+    def _day_description(self, run, day_row, n_ticked):
+        """Plain text for the day dropdown (Discord timestamps do not render inside dropdowns)."""
+        state = day_state(self.ctx, run, day_row)
+        if state == "open":
+            local = cutoff_of(day_row).astimezone(self._zone()).strftime("%a %H:%M %Z")
+            return f"{n_ticked} ticked · closes {local}"[:100]
+        return f"{n_ticked} ticked · {'not open yet' if state == 'draft' else 'closed'}"
 
     def _zone(self):
         from zoneinfo import ZoneInfo
@@ -66,25 +79,52 @@ class AvailabilityView(discord.ui.View):
 
     def render(self):
         run = self.run
-        deadline = parse_iso(run["signup_deadline_utc"])
-        keys = self.ctx.db.ticked_keys(self.run_id, self.user_id)
-        parts = [f"**{run['name']}**: signups close {discord.utils.format_dt(deadline, 'R')}",
+        db = self.ctx.db
+        rows = db.run_days(self.run_id)
+        picked = next(r for r in rows if r["day"] == self.day)
+        player = db.get_player(self.user_id)
+        prog = player["prog_index"] if player else None
+        keys = db.ticked_keys(self.run_id, self.user_id)
+
+        day_lines = []
+        for r in rows:
+            if day_accepts_signups(self.ctx, run, r):
+                day_lines.append(f"{day_label(r['day'])}: closes {discord.utils.format_dt(cutoff_of(r), 'R')}")
+            else:
+                day_lines.append(f"{day_label(r['day'])}: closed")
+        parts = [f"**{run['name']}**: each day closes the evening before. Editing **{day_label(self.day)}**, "
+                 f"signups close {discord.utils.format_dt(cutoff_of(picked), 'R')}.",
+                 f"Your prog right now: **{checkpoint_label(self.checkpoints, prog)}**. "
+                 "It changes often, so check it before each day closes.",
                  profile_text(self.ctx, run, self.user_id),
                  "Pick roles and your prog, then a day and the slots you can play. It saves as you click.",
+                 "Cutoffs:", *day_lines,
                  f"Slots ticked ({len(keys)}), in your local time:"]
-        parts += tick_lines(self.ctx, run, keys) or ["• none yet"]
-        return "\n".join(parts)[:1990]
+        parts += tick_lines(self.ctx, run, keys, limit=18) or ["• none yet"]
+        return clip_message("\n".join(parts))
 
     async def refresh(self, interaction, extra=""):
         self.sync()
-        await interaction.response.edit_message(content=(self.render() + extra)[:1990], view=self)
+        await interaction.response.edit_message(content=clip_message(self.render() + extra), view=self)
 
     async def guard(self, interaction):
-        """Stop edits once signups close (the menu can stay open for a while)."""
+        """Stop edits once every day has closed (the menu can stay open for a while)."""
         ok, why = signup_open(self.ctx, self.run)
         if not ok:
             await interaction.response.edit_message(content=why, view=None)
             self.stop()
+        return ok
+
+    async def guard_day(self, interaction):
+        """Like guard, but also refuses the day being edited when that day alone has closed.
+
+        The menu stays open so the player can switch to a day that is still open.
+        """
+        if not await self.guard(interaction):
+            return False
+        ok, why = signup_open(self.ctx, self.run, self.day)
+        if not ok:
+            await self.refresh(interaction, extra=f"\n⚠ {why} Nothing was changed.")
         return ok
 
     async def interaction_check(self, interaction):
@@ -133,7 +173,7 @@ class SlotSelect(discord.ui.Select):
 
     async def callback(self, interaction):
         v = self.view
-        if await v.guard(interaction):
+        if await v.guard_day(interaction):
             v.ctx.db.upsert_player(v.user_id, v.display_name, now=v.ctx.now())
             v.ctx.db.set_day_availability(v.run_id, v.user_id, v.day, self.values)
             await v.refresh(interaction)

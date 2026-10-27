@@ -3,11 +3,13 @@ import logging
 
 import discord
 from discord import app_commands
+from discord.ext import tasks
 
 from .commands import register
 from .config import ROOT
 from .db import DB
 from .grid import GridConfig
+from .reminders import send_due_reminders
 from .services import Ctx
 
 log = logging.getLogger("raidbot")
@@ -34,6 +36,24 @@ class RaidBot(discord.Client):
             await self.tree.sync(guild=guild)
         else:                                                     # global, can take up to an hour to appear
             await self.tree.sync()
+        if not self.ctx.cfg.get("reminder_channel_id"):
+            log.warning("No reminder_channel_id set: the bot will not remind organizers to run /draft export.")
+        self.reminder_loop.start()
+
+    async def _get_channel(self, channel_id):
+        return self.get_channel(channel_id) or await self.fetch_channel(channel_id)
+
+    @tasks.loop(minutes=1)
+    async def reminder_loop(self):
+        """Once a minute: nag organizers about days that closed and were not exported. No automatic solving."""
+        try:
+            await send_due_reminders(self.ctx, self._get_channel)
+        except Exception:
+            log.exception("reminder check failed")       # keep the loop alive
+
+    @reminder_loop.before_loop
+    async def _before_reminders(self):
+        await self.wait_until_ready()
 
     async def on_ready(self):
         log.info("Logged in as %s", self.user)

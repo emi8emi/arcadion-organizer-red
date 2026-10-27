@@ -112,6 +112,17 @@ def parse_local_datetime(text: str, tz_name: str) -> datetime:
 
 
 
+def day_cutoff(day, cutoff_hm, days_before, tz_name):
+    """When signups for `day` close: `days_before` days earlier, at the fixed local clock time `cutoff_hm`.
+
+    The result is a UTC instant. The clock time is applied in `tz_name` on the target date, so a DST change
+    between the cutoff and the day shifts the UTC value but never the wall-clock time players see.
+    """
+    local_day = day - timedelta(days=days_before)
+    local = datetime.combine(local_day, cutoff_hm, tzinfo=ZoneInfo(tz_name))   # fold=0 for ambiguous hours
+    return local.astimezone(UTC)
+
+
 def day_slots(day, g):
     """All slots whose local start falls on `day`."""
     tz = ZoneInfo(g.tz)

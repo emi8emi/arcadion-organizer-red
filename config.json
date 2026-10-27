@@ -12,6 +12,11 @@
 
   "solver_phase_cross_cost": 3,
 
+  "cutoff_time": "23:59",
+  "cutoff_days_before": 1,
+  "reminder_channel_id": null,
+  "reminder_interval_minutes": 30,
+
   "organizer_role_id": null,
   "db_path": "raidbot.sqlite3",
   "export_dir": "exports"

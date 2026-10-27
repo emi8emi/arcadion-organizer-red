@@ -34,6 +34,18 @@ CREATE TABLE IF NOT EXISTS runs (
     UNIQUE (guild_id, name)
 );
 
+-- One row per day of a run: that day's signup cutoff plus export and reminder bookkeeping.
+-- `day` is the grid-timezone date ('2026-11-02'), the same prefix the slot keys use.
+-- (runs.signup_deadline_utc is kept for old databases; the bot only reads it once, in the migration.)
+CREATE TABLE IF NOT EXISTS run_days (
+    run_id             INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    day                TEXT NOT NULL,
+    cutoff_utc         TEXT NOT NULL,
+    exported_utc       TEXT,                 -- set when /draft export ran after the cutoff; stops reminders
+    last_reminded_utc  TEXT,
+    PRIMARY KEY (run_id, day)
+);
+
 CREATE TABLE IF NOT EXISTS slots (
     id              INTEGER PRIMARY KEY,
     run_id          INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,

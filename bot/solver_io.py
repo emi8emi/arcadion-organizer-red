@@ -45,8 +45,15 @@ def _player_sort_key(discord_id):
     return (len(discord_id), discord_id)
 
 
-def build_signups(db, run, cfg):
+def build_signups(db, run, cfg, day=None):
     """Current signups for `run` as solver input. Returns (data, warnings).
+
+    With `day` ('2026-11-02') only that day's slots and the players who ticked them are exported, and two
+    things carry over from earlier days of the same run, so the solver needs no change:
+    * each player's max_per_run drops by the parties they already have on earlier days (players with none
+      left are left out and listed in `warnings`);
+    * "unmatched last run" also looks at the latest earlier day that has a stored draft.
+    Prog is read now, so it is whatever players set before the export.
 
     Deterministic: nothing in it depends on the clock, so the same database state always
     gives the same fingerprint. Players who ticked slots but have no roles or prog yet are
@@ -56,14 +63,19 @@ def build_signups(db, run, cfg):
     checkpoints = db.checkpoints(run["fight_id"])
     pos = phase_positions(checkpoints, cfg["solver_phase_cross_cost"])
     helpers = db.helper_ids(run["fight_id"])
-    unmatched = db.previous_unmatched(run)
+    unmatched = db.previous_unmatched(run, day)
+    played = db.played_counts(run["id"], day) if day else {}
 
+    slot_rows = [s for s in db.run_slots(run["id"]) if day is None or s["slot_key"][:10] == day]
+    keys_in_scope = {s["slot_key"] for s in slot_rows}
     slots = [{"id": s["slot_key"],
               "start": parse_iso(s["start_utc"]).astimezone(tz).isoformat(),
-              "minutes": s["minutes"]} for s in db.run_slots(run["id"])]
+              "minutes": s["minutes"]} for s in slot_rows]
 
     ticks = {}
     for r in db.tick_rows(run["id"]):
+        if r["slot_key"] not in keys_in_scope:
+            continue
         ticks.setdefault(r["discord_id"], {"row": r, "keys": []})["keys"].append(r["slot_key"])
 
     players, warnings = [], []
@@ -74,6 +86,11 @@ def build_signups(db, run, cfg):
             warnings.append(f"{row['display_name']} ({did}) left out: set roles and prog with /availability")
             continue
         lim = db.get_limits(run["id"], did, cfg)
+        remaining = lim["max_per_run"] - played.get(did, 0)
+        if remaining <= 0:
+            warnings.append(f"{row['display_name']} ({did}) left out: already has {played[did]} "
+                            f"part{'y' if played[did] == 1 else 'ies'} earlier in this run (their max is {lim['max_per_run']})")
+            continue
         n_drop = min(lim["drop_checkpoints"], row["prog_index"])
         players.append({
             "id": did,
@@ -82,7 +99,7 @@ def build_signups(db, run, cfg):
             "helper": did in helpers,
             "prog": row["prog_index"],
             "max_per_day": lim["max_per_day"],
-            "max_per_run": lim["max_per_run"],
+            "max_per_run": remaining,
             "drop": {"opt_in": n_drop > 0, "max_drop": drop_units(pos, row["prog_index"], n_drop)},
             "unmatched_last_run": did in unmatched,
             "available": sorted(set(ticks[did]["keys"])),
@@ -100,8 +117,10 @@ def build_signups(db, run, cfg):
     return data, warnings
 
 
-def import_draft(db, run, draft, cfg):
+def import_draft(db, run, draft, cfg, day=None):
     """Validate a solver draft against the current signups and store it as 'draft' parties.
+
+    With `day`, the draft is checked against that day's export and replaces only that day's draft parties.
 
     Raises DraftError (bad or stale file) or db.DraftConflict (run already has confirmed parties).
     Returns a summary dict.
@@ -111,13 +130,14 @@ def import_draft(db, run, draft, cfg):
     if draft.get("version") != 1:
         raise DraftError(f"Unsupported draft version {draft.get('version')!r}; this bot reads version 1.")
 
-    data, warnings = build_signups(db, run, cfg)
+    data, warnings = build_signups(db, run, cfg, day)
     current = fingerprint(data)
     if draft["input_fingerprint"] != current:
+        scope = f" for {day}" if day else ""
         raise DraftError(
-            "This draft was built from different signups than the current ones "
+            f"This draft was built from different signups than the current ones{scope} "
             f"(draft {str(draft['input_fingerprint'])[:12]}, now {current[:12]}). "
-            "Someone changed their signup, or the draft is for another run. "
+            "Someone changed their signup, or the draft is for another day or run. "
             "Run /draft export again, re-run the solver, and import the new draft.")
 
     players = {p["id"]: p for p in data["players"]}
@@ -130,6 +150,8 @@ def import_draft(db, run, draft, cfg):
         slot, idx = pa.get("slot"), pa.get("party")
         label = f"{slot} #{idx}"
         if slot not in slot_ids:
+            if day and any(sl["slot_key"] == slot for sl in db.run_slots(run["id"])):
+                raise DraftError(f"Party {label}: that slot is on a different day than {day}.")
             raise DraftError(f"Party {label}: unknown slot.")
         if (slot, idx) in seen_party:
             raise DraftError(f"Party {label} appears twice.")
@@ -160,10 +182,11 @@ def import_draft(db, run, draft, cfg):
     notes = [("slot", s["slot"], s.get("reason") or "") for s in draft.get("unfilled_slots", []) if s.get("slot")]
     notes += [("player", u["player"], u.get("reason") or "") for u in draft.get("unmatched_players", [])
               if u.get("player")]
-    db.replace_draft(run["id"], parties, notes)
+    db.replace_draft(run["id"], parties, notes, day=day)
 
     seated = {m["discord_id"] for pa in parties for m in pa["members"]}
     return {
+        "day": day,
         "parties": len(parties),
         "slots": len({pa["slot_key"] for pa in parties}),
         "seated": len(seated),
