@@ -10,8 +10,11 @@ the weights live in later steps. See "What is not built yet".
 ## Run it
 
 1. Create an application at <https://discord.com/developers/applications>, add a Bot, copy its token.
-2. Invite it to a test server with the scopes `bot` and `applications.commands` (no special permissions,
-   no privileged intents).
+2. Invite it to a test server with the scopes `bot` and `applications.commands` (no privileged intents).
+   The bot needs these permissions in the channels it posts to (the parties channel and the reminder channel):
+   **View Channel**, **Send Messages**, **Create Public Threads** and **Send Messages in Threads**.
+   `/draft approve` creates one thread per slot, so without the two thread permissions it can confirm a day
+   but cannot post the parties.
 3. In this folder (you will need [uv](https://docs.astral.sh/uv/)):
 
    ```bash
@@ -127,7 +130,28 @@ bot/db.py          SQLite layer                                 bot/heatmap.py  
 bot/handlers.py    command logic (no Discord decorators)        bot/views.py      /availability menu and modal
 bot/commands.py    slash command registration                   bot/app.py        client, command sync
 schema.sql         tables + the Ultima Weapon checkpoints       tests/            pytest suite
+bot/seed.py        fake test players (python -m bot.seed)
 ```
+
+## Testing alone with fake players
+
+A full party needs 8 people (2 tanks, 2 healers, 4 DPS) on the same slot. To try the whole flow with just your
+own account, seed 7 fake players into the bot's database and be the eighth yourself:
+
+```bash
+uv run python -m bot.seed --run "test1"              # 7 fakes: 2 tanks, 2 healers, 3 DPS (one is a helper), you play dps
+uv run python -m bot.seed --run "test1" --you tank   # you play tank, the fakes fill the other seats
+uv run python -m bot.seed --remove                   # delete every fake player and all their rows
+```
+
+Options: `--count N` (more fakes, in whole parties), `--prog N` (their checkpoint, default 0 = P1 fresh; set yours
+to match), `--helpers N`, `--slot KEY` (repeatable, to tick only some slots), `--guild-id`, `--db FILE`.
+Create the run first (`/run create`) and seed **before the day's cutoff**: after it a day's signups are frozen in
+a snapshot, and the script skips days that have one. The script can run while the bot is running; run it again
+to reset the fakes. Their ids are 19-digit numbers above 9e18 that no real account can have, and they are not
+real server members, so posted parties show them as unknown-user mentions. You can rate them yourself (the
+rating menu takes names from the database), but they cannot rate you or each other. To see `/votes summary`
+(which hides anyone with fewer than 3 votes) you need 3 real voters, or votes added by hand to the `votes` table.
 
 ## Tests
 
