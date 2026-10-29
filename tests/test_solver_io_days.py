@@ -8,7 +8,7 @@ import pytest
 
 from bot.db import DraftConflict
 from bot.solver_io import DraftError, build_signups, fingerprint, import_draft
-from conftest import S2, add_party_players, add_player, draft_for_day
+from conftest import S2, confirm, add_party_players, add_player, draft_for_day
 
 SOLVER_DIR = Path(__file__).resolve().parent.parent.parent / "raid-solver"
 D1, D2, D3 = "2026-11-01", "2026-11-02", "2026-11-03"
@@ -24,8 +24,10 @@ def week(ctx, make_run):
     return run, ids
 
 
-def seat(ctx, run, day, slot, ids):
+def seat(ctx, run, day, slot, ids, approve=False):
     import_draft(ctx.db, run, draft_for_day(ctx, run, day, slot, ids), ctx.cfg, day)
+    if approve:
+        confirm(ctx, run, day)
 
 
 def test_export_contains_only_that_days_slots_and_players(ctx, make_run):
@@ -62,13 +64,24 @@ def test_prog_is_read_at_export_time(ctx, week):
 def test_per_run_cap_is_reduced_by_parties_on_earlier_days(ctx, week):
     run, ids = week
     ctx.db.set_limits(run["id"], 1, ctx.cfg, max_per_run=2)
-    seat(ctx, run, D1, S1_, ids)
+    seat(ctx, run, D1, S1_, ids, approve=True)
     p1 = {p["id"]: p for p in build_signups(ctx.db, run, ctx.cfg, D2)[0]["players"]}
     assert p1["1"]["max_per_run"] == 1 and p1["2"]["max_per_run"] == 4 - 1
-    seat(ctx, run, D2, S2, ids)
+    seat(ctx, run, D2, S2, ids, approve=True)
     data, warnings = build_signups(ctx.db, run, ctx.cfg, D3)
     assert "1" not in {p["id"] for p in data["players"]}
     assert len(warnings) == 1 and "Player 1" in warnings[0] and "max is 2" in warnings[0]
+
+
+def test_an_unapproved_draft_on_an_earlier_day_is_not_counted_and_the_export_says_so(ctx, week):
+    run, ids = week
+    seat(ctx, run, D1, S1_, ids)                                        # imported, not approved
+    data, warnings = build_signups(ctx.db, run, ctx.cfg, D2)
+    assert {p["max_per_run"] for p in data["players"]} == {4}
+    assert len(warnings) == 1 and warnings[0].startswith("Not counted:") and "/draft approve day:2026-11-01" in warnings[0]
+    confirm(ctx, run, D1)
+    data, warnings = build_signups(ctx.db, run, ctx.cfg, D2)
+    assert {p["max_per_run"] for p in data["players"]} == {3} and warnings == []
 
 
 def test_parties_on_the_same_or_later_days_do_not_reduce_the_cap(ctx, week):
@@ -81,7 +94,7 @@ def test_parties_on_the_same_or_later_days_do_not_reduce_the_cap(ctx, week):
 def test_unmatched_flag_comes_from_the_previous_day_with_a_draft(ctx, week):
     run, ids = week
     add_player(ctx, run, 99, ["dps"], 0, [S1_, S2])          # ticked day 1, never seated
-    seat(ctx, run, D1, S1_, ids)
+    seat(ctx, run, D1, S1_, ids, approve=True)
     flags = {p["id"]: p["unmatched_last_run"] for p in build_signups(ctx.db, run, ctx.cfg, D2)[0]["players"]}
     assert flags["99"] is True and flags["1"] is False
 
@@ -90,7 +103,7 @@ def test_unmatched_flag_falls_back_to_the_previous_run(ctx, make_run):
     old = make_run("Old", status="closed")
     ids = add_party_players(ctx, old, [S2])
     add_player(ctx, old, 99, ["dps"], 0, ["2026-11-02T20:00"])
-    seat(ctx, old, D2, S2, ids)
+    seat(ctx, old, D2, S2, ids, approve=True)
     new = make_run("New")
     add_player(ctx, new, 99, ["dps"], 0, [S2])
     flags = {p["id"]: p["unmatched_last_run"] for p in build_signups(ctx.db, new, ctx.cfg, D2)[0]["players"]}

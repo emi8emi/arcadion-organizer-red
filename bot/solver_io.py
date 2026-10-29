@@ -8,12 +8,21 @@ differ, so a draft made from outdated signups can never be applied.
 import hashlib
 import json
 from collections import Counter
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from .db import parse_iso, split_roles
 from .config import ROLES
+from .votes import votes_for_export
 
 EXPORT_VERSION = 1
+# Warnings that start like this are notes about the export, not players who were left out.
+NOT_COUNTED = "Not counted:"
+NOTE_PREFIXES = ("Snapshot taken late", NOT_COUNTED)
+
+
+def is_note(warning):
+    return warning.startswith(NOTE_PREFIXES)
 
 
 class DraftError(Exception):
@@ -45,7 +54,7 @@ def _player_sort_key(discord_id):
     return (len(discord_id), discord_id)
 
 
-def build_signups(db, run, cfg, day=None):
+def build_signups(db, run, cfg, day=None, now=None):
     """Current signups for `run` as solver input. Returns (data, warnings).
 
     With `day` ('2026-11-02') only that day's slots and the players who ticked them are exported, and two
@@ -53,13 +62,19 @@ def build_signups(db, run, cfg, day=None):
     * each player's max_per_run drops by the parties they already have on earlier days (players with none
       left are left out and listed in `warnings`);
     * "unmatched last run" also looks at the latest earlier day that has a stored draft.
-    Prog is read now, so it is whatever players set before the export.
+    Only approved (confirmed) parties on earlier days count for that; an earlier day that still has an
+    unapproved draft is listed in `warnings` instead.
 
-    Deterministic: nothing in it depends on the clock, so the same database state always
+    The "votes" list holds each player pair's current like or dislike (see votes.votes_for_export). Votes
+    are read as of the day's snapshot time, so a vote cast after the cutoff does not change the export;
+    for a day without a snapshot (forced export of an open day) and for the whole-run export it is `now`.
+
+    Deterministic: for a snapshotted day nothing depends on the clock, so the same database state always
     gives the same fingerprint. Players who ticked slots but have no roles or prog yet are
     left out and listed in `warnings`.
     """
     tz = ZoneInfo(cfg["timezone"])
+    now = now or datetime.now(timezone.utc)
     checkpoints = db.checkpoints(run["fight_id"])
     pos = phase_positions(checkpoints, cfg["solver_phase_cross_cost"])
     helpers = db.helper_ids(run["fight_id"])
@@ -73,7 +88,9 @@ def build_signups(db, run, cfg, day=None):
               "minutes": s["minutes"]} for s in slot_rows]
 
     ticks = {}
-    for r in db.tick_rows(run["id"]):
+    day_row = db.run_day(run["id"], day) if day else None
+    snap = db.snapshot_rows(run["id"], day) if day_row and day_row["snapshot_utc"] else {}
+    for r in db.tick_rows(run["id"], snapshots=day is not None):
         if r["slot_key"] not in keys_in_scope:
             continue
         ticks.setdefault(r["discord_id"], {"row": r, "keys": []})["keys"].append(r["slot_key"])
@@ -85,7 +102,9 @@ def build_signups(db, run, cfg, day=None):
         if not roles or row["prog_index"] is None:
             warnings.append(f"{row['display_name']} ({did}) left out: set roles and prog with /availability")
             continue
-        lim = db.get_limits(run["id"], did, cfg)
+        s_row = snap.get(did)
+        lim = ({"max_per_day": s_row["max_per_day"], "max_per_run": s_row["max_per_run"],
+                "drop_checkpoints": s_row["drop_checkpoints"]} if s_row else db.get_limits(run["id"], did, cfg))
         remaining = lim["max_per_run"] - played.get(did, 0)
         if remaining <= 0:
             warnings.append(f"{row['display_name']} ({did}) left out: already has {played[did]} "
@@ -105,6 +124,14 @@ def build_signups(db, run, cfg, day=None):
             "available": sorted(set(ticks[did]["keys"])),
         })
 
+    if day:
+        for earlier in db.days_with_draft(run["id"]):
+            if earlier < day:
+                warnings.append(f"{NOT_COUNTED} {earlier} has a draft that is not approved yet, so its parties are "
+                                f"not counted towards per-run limits (/draft approve day:{earlier}).")
+    if day_row and day_row["snapshot_utc"] and day_row["snapshot_late"]:
+        warnings.insert(0, "Snapshot taken late: profile edits between the cutoff and now may be included.")
+    as_of = parse_iso(day_row["snapshot_utc"]) if day_row and day_row["snapshot_utc"] else now
     fight = db.fight(run["fight_id"])
     data = {
         "version": EXPORT_VERSION,
@@ -113,11 +140,12 @@ def build_signups(db, run, cfg, day=None):
                   "checkpoints": [{"index": c["idx"], "phase": c["phase"], "name": c["name"]} for c in checkpoints]},
         "slots": slots,
         "players": players,
+        "votes": votes_for_export(db, cfg, [p["id"] for p in players], as_of),
     }
     return data, warnings
 
 
-def import_draft(db, run, draft, cfg, day=None):
+def import_draft(db, run, draft, cfg, day=None, now=None):
     """Validate a solver draft against the current signups and store it as 'draft' parties.
 
     With `day`, the draft is checked against that day's export and replaces only that day's draft parties.
@@ -130,7 +158,7 @@ def import_draft(db, run, draft, cfg, day=None):
     if draft.get("version") != 1:
         raise DraftError(f"Unsupported draft version {draft.get('version')!r}; this bot reads version 1.")
 
-    data, warnings = build_signups(db, run, cfg, day)
+    data, warnings = build_signups(db, run, cfg, day, now)
     current = fingerprint(data)
     if draft["input_fingerprint"] != current:
         scope = f" for {day}" if day else ""

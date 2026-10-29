@@ -17,6 +17,11 @@
   "reminder_channel_id": null,
   "reminder_interval_minutes": 30,
 
+  "parties_channel_id": null,
+  "vote_window_hours": 72,
+  "vote_expiry_days": 90,
+  "vote_floor": 3,
+
   "organizer_role_id": null,
   "db_path": "raidbot.sqlite3",
   "export_dir": "exports"

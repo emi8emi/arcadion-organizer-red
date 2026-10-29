@@ -113,6 +113,23 @@ class DraftGroup(app_commands.Group):
         await handlers.draft_import(self.ctx, interaction, draft_file, name, day)
 
 
+    @app_commands.command(name="approve", description="Confirm one day's draft and post the parties in the parties channel")
+    @app_commands.describe(name="Run name (default: the newest run)",
+                           day="The day, like 2026-11-02 (default: the earliest day with a draft)")
+    async def approve(self, interaction: discord.Interaction, name: Optional[str] = None, day: Optional[str] = None):
+        await handlers.draft_approve(self.ctx, interaction, name, day)
+
+
+class VotesGroup(app_commands.Group):
+    def __init__(self, ctx):
+        super().__init__(name="votes", description="Organizers: ratings between players", guild_only=True)
+        self.ctx = ctx
+
+    @app_commands.command(name="summary", description="Likes and dislikes received per player (no voter names)")
+    async def summary(self, interaction: discord.Interaction):
+        await handlers.votes_summary(self.ctx, interaction)
+
+
 class HelperGroup(app_commands.Group):
     def __init__(self, ctx):
         super().__init__(name="helper", description="Organizers: helper status", guild_only=True)
@@ -135,6 +152,12 @@ def register(tree, ctx):
     tree.add_command(RunGroup(ctx))
     tree.add_command(DraftGroup(ctx))
     tree.add_command(HelperGroup(ctx))
+    tree.add_command(VotesGroup(ctx))
+
+    @tree.command(name="rate", description="Rate the players of a party you finished (private)")
+    @app_commands.guild_only()
+    async def rate(interaction: discord.Interaction):
+        await handlers.rate(ctx, interaction)
 
     @tree.command(name="availability", description="Sign up: your roles, prog and the slots you can play")
     # no autocomplete for this, since i'm not sure if it's spammable

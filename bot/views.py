@@ -3,8 +3,9 @@ import discord
 
 from .config import ROLES
 from .db import parse_iso, split_roles
+from .votes import SYMBOL, cast_vote, current_rating, time_reason
 from .services import (checkpoint_label, clip_message, day_accepts_signups, day_label, day_state, cutoff_of,
-                       profile_text, signup_open, tick_lines, validate_limits)
+                       profile_text, signup_open, snapshot_note, tick_lines, validate_limits)
 
 
 class AvailabilityView(discord.ui.View):
@@ -77,7 +78,7 @@ class AvailabilityView(discord.ui.View):
         from zoneinfo import ZoneInfo
         return ZoneInfo(self.ctx.cfg["timezone"])
 
-    def render(self):
+    def render(self, limit=1990):
         run = self.run
         db = self.ctx.db
         rows = db.run_days(self.run_id)
@@ -101,11 +102,17 @@ class AvailabilityView(discord.ui.View):
                  "Cutoffs:", *day_lines,
                  f"Slots ticked ({len(keys)}), in your local time:"]
         parts += tick_lines(self.ctx, run, keys, limit=18) or ["• none yet"]
-        return clip_message("\n".join(parts))
+        return clip_message("\n".join(parts), limit)
 
     async def refresh(self, interaction, extra=""):
         self.sync()
-        await interaction.response.edit_message(content=clip_message(self.render() + extra), view=self)
+        # the extra line is appended after clipping, so a long menu can never push it out of the message
+        await interaction.response.edit_message(content=self.render(1990 - len(extra)) + extra, view=self)
+
+    async def refresh_after_edit(self, interaction):
+        """After a change to roles, prog or limits: tell the player if some of their days are already frozen."""
+        note = snapshot_note(self.ctx, self.run, self.user_id)
+        await self.refresh(interaction, extra=f"\nℹ {note}" if note else "")
 
     async def guard(self, interaction):
         """Stop edits once every day has closed (the menu can stay open for a while)."""
@@ -140,7 +147,7 @@ class RoleSelect(discord.ui.Select):
         v = self.view
         if await v.guard(interaction):
             v.ctx.db.upsert_player(v.user_id, v.display_name, roles=self.values, now=v.ctx.now())
-            await v.refresh(interaction)
+            await v.refresh_after_edit(interaction)
 
 
 class ProgSelect(discord.ui.Select):
@@ -152,7 +159,7 @@ class ProgSelect(discord.ui.Select):
         v = self.view
         if await v.guard(interaction):
             v.ctx.db.upsert_player(v.user_id, v.display_name, prog_index=int(self.values[0]), now=v.ctx.now())
-            await v.refresh(interaction)
+            await v.refresh_after_edit(interaction)
 
 
 class DaySelect(discord.ui.Select):
@@ -196,8 +203,8 @@ class DoneButton(discord.ui.Button):
     async def callback(self, interaction):
         v = self.view
         v.stop()
-        await interaction.response.edit_message(content=v.render() + "\n\n✅ Saved. Run /availability again to change it.",
-                                                view=None)
+        done = "\n\n✅ Saved. Run /availability again to change it."
+        await interaction.response.edit_message(content=v.render(1990 - len(done)) + done, view=None)
 
 
 class LimitsModal(discord.ui.Modal):
@@ -230,4 +237,159 @@ class LimitsModal(discord.ui.Modal):
             v.ctx.db.upsert_player(v.user_id, v.display_name, now=v.ctx.now())
             v.ctx.db.set_limits(v.run_id, v.user_id, v.ctx.cfg, max_per_day=per_day, max_per_run=per_run,
                                 drop_checkpoints=drop)
-            await v.refresh(interaction)
+            await v.refresh_after_edit(interaction)
+
+
+# ---------------------------------------------------------------- rating (private, ephemeral only)
+
+def party_title(party):
+    """'Mon 02 Nov 17:00 · party 1' (local slot time, short enough for a button label)."""
+    return f"{_party_day(party)} {party['slot_key'][11:16]} · party {party['party_index'] + 1}"
+
+
+def _party_day(party):
+    from .services import day_label
+    return day_label(party["slot_key"][:10])
+
+
+class RatePartyButton(discord.ui.DynamicItem[discord.ui.Button], template=r"rate:(?P<party>[0-9]+)"):
+    """The "Rate party N" button in a slot's thread. It survives bot restarts (the id carries the party)."""
+
+    def __init__(self, party_id, label="Rate your party"):
+        super().__init__(discord.ui.Button(label=label[:80], style=discord.ButtonStyle.primary,
+                                           custom_id=f"rate:{party_id}"))
+        self.party_id = int(party_id)
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match, /):
+        return cls(int(match["party"]))
+
+    async def callback(self, interaction):
+        await open_rating(interaction.client.ctx, interaction, self.party_id)
+
+
+class RatePromptView(discord.ui.View):
+    """One "Rate party N" button per party of the slot (Discord allows 25 buttons in a message)."""
+
+    def __init__(self, parties):
+        super().__init__(timeout=None)
+        for p in list(parties)[:25]:
+            self.add_item(RatePartyButton(p["id"], f"Rate party {p['party_index'] + 1}"))
+
+
+async def open_rating(ctx, interaction, party_id):
+    """Open the private rating view for one party, if this player was in it and ratings are open."""
+    party = ctx.db.party(party_id)
+    me = str(interaction.user.id)
+    members = ctx.db.party_members(party_id) if party else []
+    if party is None or party["status"] not in ("confirmed", "done") or me not in {m["discord_id"] for m in members}:
+        await interaction.response.send_message("You were not in that party.", ephemeral=True)
+        return
+    why = time_reason(party, ctx.cfg, ctx.now())
+    if why:
+        await interaction.response.send_message(why, ephemeral=True)
+        return
+    view = RateView(ctx, party_id, me)
+    await interaction.response.send_message(view.render(), view=view, ephemeral=True)
+
+
+class RateView(discord.ui.View):
+    """Ephemeral: pick another member, press Like / Neutral / Dislike (saved at once), Done."""
+
+    def __init__(self, ctx, party_id, user_id):
+        super().__init__(timeout=900)
+        self.ctx, self.party_id, self.user_id = ctx, party_id, str(user_id)
+        self.target = None
+        self.notice = ""
+        self.members = [m for m in ctx.db.party_members(party_id) if m["discord_id"] != self.user_id]
+        self.names = {m["discord_id"]: (ctx.db.get_player(m["discord_id"]) or {"display_name": "Player"})["display_name"]
+                      for m in self.members}
+        self.member_select = MemberSelect()
+        self.buttons = [RateButton(v) for v in ("like", "neutral", "dislike")]
+        for item in (self.member_select, *self.buttons, RateDoneButton()):
+            self.add_item(item)
+        self.sync()
+
+    def sync(self):
+        now = self.ctx.now()
+        self.member_select.options = [
+            discord.SelectOption(
+                label=self.names[m["discord_id"]][:100], value=m["discord_id"], default=m["discord_id"] == self.target,
+                description=f"{m['role']} · you rated: {SYMBOL[current_rating(self.ctx.db, self.user_id, m['discord_id'], now)]}"[:100])
+            for m in self.members[:25]]
+        for b in self.buttons:
+            b.disabled = self.target is None
+            b.style = (discord.ButtonStyle.success if b.vote == "like" else discord.ButtonStyle.danger
+                       if b.vote == "dislike" else discord.ButtonStyle.secondary)
+
+    def render(self):
+        party = self.ctx.db.party(self.party_id)
+        lines = [f"**Rate your party:** {party_title(party)}",
+                 "Only you can see this. Nobody else sees what you pick, and you can change it until the window closes."]
+        if self.target:
+            now = SYMBOL[current_rating(self.ctx.db, self.user_id, self.target, self.ctx.now())]
+            lines.append(f"**{self.names[self.target]}**: your rating is **{now}**.")
+        else:
+            lines.append("Pick a player below.")
+        if self.notice:
+            lines.append(self.notice)
+        return "\n".join(lines)[:1990]
+
+    async def interaction_check(self, interaction):
+        return str(interaction.user.id) == self.user_id
+
+    async def redraw(self, interaction):
+        self.sync()
+        await interaction.response.edit_message(content=self.render(), view=self)
+
+
+class MemberSelect(discord.ui.Select):
+    def __init__(self):
+        super().__init__(placeholder="Who do you want to rate?", min_values=1, max_values=1,
+                         options=[discord.SelectOption(label="loading", value="0")], row=0)
+
+    async def callback(self, interaction):
+        v = self.view
+        v.target, v.notice = self.values[0], ""
+        await v.redraw(interaction)
+
+
+class RateButton(discord.ui.Button):
+    def __init__(self, vote):
+        super().__init__(label=SYMBOL[vote], style=discord.ButtonStyle.secondary, disabled=True, row=1)
+        self.vote = vote
+
+    async def callback(self, interaction):
+        v = self.view
+        ok, why = cast_vote(v.ctx, v.user_id, v.target, self.vote, v.party_id)
+        v.notice = "" if ok else f"⚠ {why} Nothing was saved."
+        await v.redraw(interaction)
+
+
+class RateDoneButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Done", style=discord.ButtonStyle.success, row=1)
+
+    async def callback(self, interaction):
+        self.view.stop()
+        await interaction.response.edit_message(content="✅ Saved. Press the button again any time before the window closes.",
+                                                view=None)
+
+
+class RateListView(discord.ui.View):
+    """For /rate: one button per party the player can still rate."""
+
+    def __init__(self, ctx, parties):
+        super().__init__(timeout=900)
+        self.ctx = ctx
+        for p in parties[:20]:
+            self.add_item(RateListButton(p["party_id"], party_title(p)))
+
+
+class RateListButton(discord.ui.Button):
+    def __init__(self, party_id, label):
+        super().__init__(label=label[:80], style=discord.ButtonStyle.primary)
+        self.party_id = party_id
+
+    async def callback(self, interaction):
+        await open_rating(self.view.ctx, interaction, self.party_id)

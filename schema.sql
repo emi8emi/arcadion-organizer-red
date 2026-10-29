@@ -43,7 +43,26 @@ CREATE TABLE IF NOT EXISTS run_days (
     cutoff_utc         TEXT NOT NULL,
     exported_utc       TEXT,                 -- set when /draft export ran after the cutoff; stops reminders
     last_reminded_utc  TEXT,
+    snapshot_utc       TEXT,                 -- set once the day's signups were frozen (even with zero signups)
+    snapshot_late      INTEGER NOT NULL DEFAULT 0,   -- 1 = taken well after the cutoff, so later edits may be in it
     PRIMARY KEY (run_id, day)
+);
+
+-- Each day's signups frozen at that day's cutoff: later edits to roles, prog or limits do not touch them.
+-- Helper grants are deliberately not snapshotted.
+CREATE TABLE IF NOT EXISTS day_snapshots (
+    run_id            INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    day               TEXT NOT NULL,
+    discord_id        TEXT NOT NULL,
+    display_name      TEXT NOT NULL,
+    roles             TEXT NOT NULL DEFAULT '',
+    prog_index        INTEGER,
+    max_per_day       INTEGER NOT NULL,
+    max_per_run       INTEGER NOT NULL,
+    drop_checkpoints  INTEGER NOT NULL,
+    taken_utc         TEXT NOT NULL,
+    late              INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (run_id, day, discord_id)
 );
 
 CREATE TABLE IF NOT EXISTS slots (
@@ -53,6 +72,8 @@ CREATE TABLE IF NOT EXISTS slots (
     start_utc       TEXT NOT NULL,
     minutes         INTEGER NOT NULL DEFAULT 90, -- scheduled length
     actual_minutes  INTEGER,                     -- filled in when a slot ends early
+    thread_id       TEXT,                        -- Discord thread the approved parties were posted in
+    rating_posted_utc TEXT,                      -- when the "Rate your party" buttons went into that thread
     UNIQUE (run_id, slot_key)
 );
 
@@ -107,6 +128,7 @@ CREATE TABLE IF NOT EXISTS parties (
     party_index   INTEGER NOT NULL,
     status        TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'confirmed', 'done')),
     target_idx    INTEGER,                        -- checkpoint the party is built around
+    message_id    TEXT,                           -- the Discord message that announced the party
     UNIQUE (run_id, slot_id, party_index)
 );
 
@@ -125,17 +147,6 @@ CREATE TABLE IF NOT EXISTS standby (
     slot_id     INTEGER NOT NULL REFERENCES slots(id) ON DELETE CASCADE,
     discord_id  TEXT NOT NULL,
     PRIMARY KEY (slot_id, discord_id)
-);
-
--- Private "run with them again?" answers. Admins read aggregates only.
-CREATE TABLE IF NOT EXISTS votes (
-    id           INTEGER PRIMARY KEY,
-    slot_id      INTEGER NOT NULL REFERENCES slots(id) ON DELETE CASCADE,
-    voter_id     TEXT NOT NULL,
-    target_id    TEXT NOT NULL,
-    answer       TEXT NOT NULL CHECK (answer IN ('yes', 'neutral', 'no')),
-    created_utc  TEXT NOT NULL,
-    UNIQUE (slot_id, voter_id, target_id)
 );
 
 -- Minutes actually played, for burnout tracking.
@@ -182,3 +193,17 @@ INSERT OR IGNORE INTO checkpoints (fight_id, idx, phase, name) VALUES
     (1, 16, 'P4', 'Annihilation'),
     (1, 17, 'P4', 'Suppression'),
     (1, 18, 'P4', 'Enrage');
+
+-- Ratings between players who shared a confirmed party. Append-only: the latest row per (voter, target)
+-- is the current vote, and 'neutral' is stored so a changed mind clears an earlier like or dislike.
+-- Never shown to players; organizers only see aggregates (/votes summary).
+CREATE TABLE IF NOT EXISTS votes (
+    id           INTEGER PRIMARY KEY,
+    run_id       INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    slot_id      INTEGER NOT NULL REFERENCES slots(id) ON DELETE CASCADE,
+    voter_id     TEXT NOT NULL,
+    target_id    TEXT NOT NULL,
+    vote         TEXT NOT NULL CHECK (vote IN ('like', 'neutral', 'dislike')),
+    created_utc  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS votes_pair ON votes (voter_id, target_id, created_utc);

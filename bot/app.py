@@ -9,7 +9,10 @@ from .commands import register
 from .config import ROOT
 from .db import DB
 from .grid import GridConfig
+from .posting import post_rating_prompts
 from .reminders import send_due_reminders
+from .snapshots import take_due_snapshots
+from .views import RatePartyButton
 from .services import Ctx
 
 log = logging.getLogger("raidbot")
@@ -25,6 +28,7 @@ class RaidBot(discord.Client):
     def __init__(self, ctx, guild_id=None):
         super().__init__(intents=discord.Intents.default())      # slash commands need no privileged intents
         self.ctx, self.guild_id = ctx, guild_id
+        ctx.get_channel = self._get_channel
         self.tree = app_commands.CommandTree(self)
         register(self.tree, ctx)
         self.tree.on_error = self.on_tree_error
@@ -38,6 +42,7 @@ class RaidBot(discord.Client):
             await self.tree.sync()
         if not self.ctx.cfg.get("reminder_channel_id"):
             log.warning("No reminder_channel_id set: the bot will not remind organizers to run /draft export.")
+        self.add_dynamic_items(RatePartyButton)           # the thread buttons keep working after a restart
         self.reminder_loop.start()
 
     async def _get_channel(self, channel_id):
@@ -45,7 +50,17 @@ class RaidBot(discord.Client):
 
     @tasks.loop(minutes=1)
     async def reminder_loop(self):
-        """Once a minute: nag organizers about days that closed and were not exported. No automatic solving."""
+        """Once a minute: freeze signups of days that just closed, then nag organizers about days not yet exported.
+
+        No automatic solving."""
+        try:
+            take_due_snapshots(self.ctx.db, self.ctx.now(), self.ctx.cfg)     # freeze each day's signups at its cutoff
+        except Exception:
+            log.exception("taking day snapshots failed")
+        try:
+            await post_rating_prompts(self.ctx)                                  # slots that just ended
+        except Exception:
+            log.exception("posting rating prompts failed")
         try:
             await send_due_reminders(self.ctx, self._get_channel)
         except Exception:

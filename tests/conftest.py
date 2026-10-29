@@ -207,3 +207,9 @@ def at(clock, text):
     """Set the fake clock to 'YYYY-MM-DDTHH:MM' UTC."""
     clock["now"] = datetime.fromisoformat(text).replace(tzinfo=timezone.utc)
     return clock["now"]
+
+
+def confirm(ctx, run, day=None):
+    """What /draft approve does to the database: the draft parties (of one day, or all) become confirmed."""
+    days = [day] if day else sorted({s["slot_key"][:10] for s in ctx.db.run_slots(run["id"])})
+    return sum(ctx.db.confirm_day(run["id"], d) for d in days)

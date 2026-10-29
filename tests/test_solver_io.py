@@ -8,7 +8,7 @@ import pytest
 
 from bot.db import DraftConflict
 from bot.solver_io import DraftError, build_signups, drop_units, fingerprint, import_draft, phase_positions
-from conftest import NOW, SLOT, add_player, draft_for, fill_one_party
+from conftest import NOW, SLOT, confirm, add_player, draft_for, fill_one_party
 
 SOLVER_DIR = Path(__file__).resolve().parent.parent.parent / "raid-solver"
 
@@ -27,7 +27,7 @@ def test_export_has_the_shape_the_solver_reads(ctx, world):
     run, ids = world
     data, warnings = build_signups(ctx.db, run, ctx.cfg)
     assert warnings == []
-    assert set(data) == {"version", "run", "fight", "slots", "players"}
+    assert set(data) == {"version", "run", "fight", "slots", "players", "votes"} and data["votes"] == []
     assert data["run"] == {"name": "UWU week 1", "timezone": "America/New_York"}
     assert len(data["fight"]["checkpoints"]) == 19
     assert data["fight"]["checkpoints"][4] == {"index": 4, "phase": "P1", "name": "Enrage"}
@@ -93,6 +93,7 @@ def test_unmatched_last_run_flag_comes_from_the_previous_run(ctx, make_run):
     add_player(ctx, old, 99, ["dps"], 0, ["2026-11-02T20:00"])
     draft = draft_for(ctx, old, [str(i) for i in ids])
     import_draft(ctx.db, old, draft, ctx.cfg)
+    confirm(ctx, old)
     new = make_run("New")
     add_player(ctx, new, 99, ["dps"], 0, [SLOT])
     add_player(ctx, new, 1, ["tank"], 0, [SLOT])

@@ -1,7 +1,7 @@
 """Shared pieces for command handlers and the signup views."""
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
-from typing import Callable
+from typing import Callable, Optional
 from zoneinfo import ZoneInfo
 
 import discord
@@ -19,6 +19,7 @@ class Ctx:
     cfg: dict
     grid: GridConfig
     now: Callable[[], datetime] = field(default=lambda: datetime.now(timezone.utc))
+    get_channel: Optional[Callable] = None        # async (channel_id) -> channel or thread; set by the bot
 
 
 def day_label(day):
@@ -151,3 +152,36 @@ def valid_timezone(name):
         return True
     except Exception:
         return False
+
+
+def snapshotted_days_of(ctx, run, discord_id):
+    """Days this player signed up for whose signups were already frozen at the cutoff, in order."""
+    mine = {k[:10] for k in ctx.db.ticked_keys(run["id"], discord_id)}
+    return [d["day"] for d in ctx.db.run_days(run["id"]) if d["snapshot_utc"] and d["day"] in mine]
+
+
+def snapshot_note(ctx, run, discord_id):
+    """Shown after a player edits roles, prog or limits, when some of their days are already frozen.
+
+    Empty string when it does not apply.
+    """
+    days = snapshotted_days_of(ctx, run, discord_id)
+    if not days:
+        return ""
+    names = ", ".join(day_label(d) for d in days[:3]) + (f" and {len(days) - 3} more" if len(days) > 3 else "")
+    first_open = next(iter(open_days(ctx, run)), None)
+    applies = f" This change applies from {day_label(first_open['day'])}." if first_open else ""
+    return f"Your roles, prog and limits for {names} were saved at their cutoffs.{applies}"
+
+
+def locked_prog_lines(ctx, run, discord_id, limit=10):
+    """For /myschedule: the prog checkpoint locked in for each closed day the player signed up for."""
+    cps = ctx.db.checkpoints(run["fight_id"])
+    lines = []
+    for d in snapshotted_days_of(ctx, run, discord_id):
+        snap = ctx.db.snapshot_rows(run["id"], d).get(str(discord_id))
+        if snap:
+            lines.append(f"• {day_label(d)}: {checkpoint_label(cps, snap['prog_index'])}")
+    if len(lines) > limit:
+        lines = lines[:limit] + [f"… and {len(lines) - limit} more"]
+    return ["Prog locked in at each closed day's cutoff:"] + lines if lines else []

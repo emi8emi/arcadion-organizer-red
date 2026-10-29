@@ -2,7 +2,7 @@ import sqlite3
 import pytest
 
 from bot.db import DB, DraftConflict, DuplicateRun
-from conftest import NOW, add_player, fill_one_party
+from conftest import NOW, add_player, confirm, fill_one_party
 
 
 def test_schema_is_idempotent_and_seeds_the_fight_once(tmp_path):
@@ -126,6 +126,8 @@ def test_previous_unmatched_lists_ticked_players_without_a_party(ctx, make_run):
     add_player(ctx, old, 99, ["dps"], 0, ["2026-11-02T20:00"])     # ticked, never seated
     ctx.db.replace_draft(old["id"], [_party("2026-11-02T17:00", 0, ids)], [])
     new = make_run("New")
+    assert ctx.db.previous_unmatched(new) == set()                 # an unapproved draft does not count
+    confirm(ctx, old)
     assert ctx.db.previous_unmatched(new) == {"99"}
     assert ctx.db.previous_unmatched(old) == set()                 # no earlier run
 
