@@ -11,6 +11,9 @@ from .config import ROLES
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schema.sql"
 
 
+GUILD_SETTING_KEYS = ("organizer_role_id", "reminder_channel_id", "parties_channel_id")
+
+
 class DuplicateRun(Exception):
     """A run with that name already exists in the server."""
 
@@ -70,6 +73,10 @@ class DB:
                               o.created_utc FROM votes_old o JOIN slots s ON s.id = o.slot_id""")
                 self.conn.execute("DROP TABLE votes_old")
         with self.conn:
+            self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS guild_settings (
+                       guild_id TEXT PRIMARY KEY, organizer_role_id TEXT,
+                       reminder_channel_id TEXT, parties_channel_id TEXT)""")
             for table, col, ddl in (("run_days", "snapshot_utc", "TEXT"),
                                     ("run_days", "snapshot_late", "INTEGER NOT NULL DEFAULT 0"),
                                     ("slots", "thread_id", "TEXT"), ("slots", "rating_posted_utc", "TEXT"),
@@ -539,6 +546,27 @@ class DB:
     def mark_rating_posted(self, slot_id, now):
         with self.conn:
             self.conn.execute("UPDATE slots SET rating_posted_utc = ? WHERE id = ?", (iso(now), slot_id))
+
+    def guild_setting(self, guild_id, key, default=None):
+        """A per-server setting set with /settings, or `default` (the .env / config.json value) when unset."""
+        if key not in GUILD_SETTING_KEYS:
+            raise KeyError(key)
+        row = self.conn.execute(f"SELECT {key} FROM guild_settings WHERE guild_id = ?", (str(guild_id),)).fetchone()
+        return row[0] if row and row[0] else default
+
+    def set_guild_setting(self, guild_id, key, value):
+        """Set one per-server setting; `None` clears it so the default applies again."""
+        if key not in GUILD_SETTING_KEYS:
+            raise KeyError(key)
+        with self.conn:
+            self.conn.execute("INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)", (str(guild_id),))
+            self.conn.execute(f"UPDATE guild_settings SET {key} = ? WHERE guild_id = ?",
+                              (None if value is None else str(value), str(guild_id)))
+
+    def move_slot_start(self, slot_id, start_utc):
+        """Debug only: move a slot's start (used by /debug complete to make a slot count as ended)."""
+        with self.conn:
+            self.conn.execute("UPDATE slots SET start_utc = ? WHERE id = ?", (iso(start_utc), slot_id))
 
     def slots_awaiting_rating(self):
         """Slots with a thread, approved parties and no "Rate your party" message yet (the caller checks the end)."""

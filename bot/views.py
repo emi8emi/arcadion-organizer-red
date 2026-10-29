@@ -3,7 +3,7 @@ import discord
 
 from .config import ROLES
 from .db import parse_iso, split_roles
-from .votes import SYMBOL, cast_vote, current_rating, time_reason
+from .votes import cast_vote, current_rating, time_reason
 from .services import (checkpoint_label, clip_message, day_accepts_signups, day_label, day_state, cutoff_of,
                        profile_text, signup_open, snapshot_note, tick_lines, validate_limits)
 
@@ -214,8 +214,8 @@ class LimitsModal(discord.ui.Modal):
         lim = view.ctx.db.get_limits(view.run_id, view.user_id, view.ctx.cfg)
         self.per_day = discord.ui.TextInput(label="Max parties per day", default=str(lim["max_per_day"]),
                                             max_length=2)
-        self.per_run = discord.ui.TextInput(label="Max parties for the whole run", default=str(lim["max_per_run"]),
-                                            max_length=2)
+        # self.per_run = discord.ui.TextInput(label="Max parties for the whole run", default=str(lim["max_per_run"]),
+        #                                     max_length=2)
         self.drop = discord.ui.TextInput(
             label="OK with playing lower progs (0 = no)", default=str(lim["drop_checkpoints"]),
             max_length=2)
@@ -293,44 +293,43 @@ async def open_rating(ctx, interaction, party_id):
     await interaction.response.send_message(view.render(), view=view, ephemeral=True)
 
 
+RATING_EMOJI = {"like": "👍", "neutral": "😐", "dislike": "👎"}
+RATING_STYLE = {"like": discord.ButtonStyle.success, "neutral": discord.ButtonStyle.secondary,
+                "dislike": discord.ButtonStyle.danger}
+NEXT_RATING = {"neutral": "like", "like": "dislike", "dislike": "neutral"}   # one tap = next rating
+
+
 class RateView(discord.ui.View):
-    """Ephemeral: pick another member, press Like / Neutral / Dislike (saved at once), Done."""
+    """Ephemeral: one button per other member. Tap a name to cycle their rating 😐 -> 👍 -> 👎 -> 😐
+    (each tap is saved at once). Ratings are read from the database once, when the view opens."""
 
     def __init__(self, ctx, party_id, user_id):
         super().__init__(timeout=900)
         self.ctx, self.party_id, self.user_id = ctx, party_id, str(user_id)
-        self.target = None
         self.notice = ""
-        self.members = [m for m in ctx.db.party_members(party_id) if m["discord_id"] != self.user_id]
-        self.names = {m["discord_id"]: (ctx.db.get_player(m["discord_id"]) or {"display_name": "Player"})["display_name"]
-                      for m in self.members}
-        self.member_select = MemberSelect()
-        self.buttons = [RateButton(v) for v in ("like", "neutral", "dislike")]
-        for item in (self.member_select, *self.buttons, RateDoneButton()):
-            self.add_item(item)
+        self.title = party_title(ctx.db.party(party_id))
+        self.members = [m for m in ctx.db.party_members(party_id) if m["discord_id"] != self.user_id][:20]
+        now = ctx.now()
+        self.ratings = {m["discord_id"]: current_rating(ctx.db, self.user_id, m["discord_id"], now)
+                        for m in self.members}
+        self.buttons = []
+        for i, m in enumerate(self.members):
+            name = (ctx.db.get_player(m["discord_id"]) or {"display_name": "Player"})["display_name"]
+            button = MemberRateButton(m["discord_id"], f"{name} · {m['role']}"[:80], row=i // 5)
+            self.buttons.append(button)
+            self.add_item(button)
+        self.add_item(RateDoneButton())
         self.sync()
 
     def sync(self):
-        now = self.ctx.now()
-        self.member_select.options = [
-            discord.SelectOption(
-                label=self.names[m["discord_id"]][:100], value=m["discord_id"], default=m["discord_id"] == self.target,
-                description=f"{m['role']} · you rated: {SYMBOL[current_rating(self.ctx.db, self.user_id, m['discord_id'], now)]}"[:100])
-            for m in self.members[:25]]
         for b in self.buttons:
-            b.disabled = self.target is None
-            b.style = (discord.ButtonStyle.success if b.vote == "like" else discord.ButtonStyle.danger
-                       if b.vote == "dislike" else discord.ButtonStyle.secondary)
+            rating = self.ratings[b.target_id]
+            b.emoji, b.style = RATING_EMOJI[rating], RATING_STYLE[rating]
 
     def render(self):
-        party = self.ctx.db.party(self.party_id)
-        lines = [f"**Rate your party:** {party_title(party)}",
-                 "Only you can see this. Nobody else sees what you pick, and you can change it until the window closes."]
-        if self.target:
-            now = SYMBOL[current_rating(self.ctx.db, self.user_id, self.target, self.ctx.now())]
-            lines.append(f"**{self.names[self.target]}**: your rating is **{now}**.")
-        else:
-            lines.append("Pick a player below.")
+        lines = [f"**Rate your party:** {self.title}",
+                 "Tap a player to change your rating: 😐 neutral → 👍 like → 👎 dislike → 😐. "
+                 "Saved at once. Only you can see this, and you can change it until the window closes."]
         if self.notice:
             lines.append(self.notice)
         return "\n".join(lines)[:1990]
@@ -343,32 +342,25 @@ class RateView(discord.ui.View):
         await interaction.response.edit_message(content=self.render(), view=self)
 
 
-class MemberSelect(discord.ui.Select):
-    def __init__(self):
-        super().__init__(placeholder="Who do you want to rate?", min_values=1, max_values=1,
-                         options=[discord.SelectOption(label="loading", value="0")], row=0)
+class MemberRateButton(discord.ui.Button):
+    def __init__(self, target_id, label, row):
+        super().__init__(label=label, style=discord.ButtonStyle.secondary, emoji=RATING_EMOJI["neutral"], row=row)
+        self.target_id = target_id
 
     async def callback(self, interaction):
         v = self.view
-        v.target, v.notice = self.values[0], ""
-        await v.redraw(interaction)
-
-
-class RateButton(discord.ui.Button):
-    def __init__(self, vote):
-        super().__init__(label=SYMBOL[vote], style=discord.ButtonStyle.secondary, disabled=True, row=1)
-        self.vote = vote
-
-    async def callback(self, interaction):
-        v = self.view
-        ok, why = cast_vote(v.ctx, v.user_id, v.target, self.vote, v.party_id)
-        v.notice = "" if ok else f"⚠ {why} Nothing was saved."
+        new = NEXT_RATING[v.ratings[self.target_id]]
+        ok, why = cast_vote(v.ctx, v.user_id, self.target_id, new, v.party_id)
+        if ok:
+            v.ratings[self.target_id], v.notice = new, ""
+        else:
+            v.notice = f"⚠ {why} Nothing was saved."
         await v.redraw(interaction)
 
 
 class RateDoneButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="Done", style=discord.ButtonStyle.success, row=1)
+        super().__init__(label="Done", style=discord.ButtonStyle.primary, row=4)
 
     async def callback(self, interaction):
         self.view.stop()

@@ -1,4 +1,5 @@
 """Slash command registration. Thin wrappers: the real logic is in handlers.py."""
+import os
 from typing import Optional
 
 import discord
@@ -148,11 +149,54 @@ class HelperGroup(app_commands.Group):
         await handlers.helper_revoke(self.ctx, interaction, member, content)
 
 
+class DebugGroup(app_commands.Group):
+    def __init__(self, ctx):
+        super().__init__(name="debug", description="Organizers: testing helpers", guild_only=True)
+        self.ctx = ctx
+
+    @app_commands.command(name="complete", description="Testing: mark approved slots as ended so voting can start")
+    @app_commands.describe(name="Run name (default: the newest run)",
+                           day="Optional: only this day, like 2026-11-02 (default: every day of the run)")
+    async def complete(self, interaction: discord.Interaction, name: Optional[str] = None,
+                       day: Optional[str] = None):
+        await handlers.debug_complete(self.ctx, interaction, name, day)
+
+
+class SettingsGroup(app_commands.Group):
+    def __init__(self, ctx):
+        super().__init__(name="settings", description="Server settings: organizer role and channels",
+                         guild_only=True, default_permissions=discord.Permissions(manage_guild=True))
+        self.ctx = ctx
+
+    @app_commands.command(name="show", description="Show this server's settings")
+    async def show(self, interaction: discord.Interaction):
+        await handlers.settings_show(self.ctx, interaction)
+
+    @app_commands.command(name="set", description="Set the organizer role and/or channels (leave out what you keep)")
+    @app_commands.describe(organizer_role="Role that counts as organizer (Manage Server always counts)",
+                           reminder_channel="Channel where I remind organizers to run /draft export",
+                           parties_channel="Channel where I create the party threads after /draft approve")
+    async def set(self, interaction: discord.Interaction, organizer_role: Optional[discord.Role] = None,
+                  reminder_channel: Optional[discord.TextChannel] = None,
+                  parties_channel: Optional[discord.TextChannel] = None):
+        await handlers.settings_set(self.ctx, interaction, organizer_role, reminder_channel, parties_channel)
+
+    @app_commands.command(name="clear", description="Remove one setting, so the bot's default applies again")
+    @app_commands.choices(setting=[app_commands.Choice(name="Organizer role", value="organizer_role_id"),
+                                   app_commands.Choice(name="Reminder channel", value="reminder_channel_id"),
+                                   app_commands.Choice(name="Parties channel", value="parties_channel_id")])
+    async def clear(self, interaction: discord.Interaction, setting: app_commands.Choice[str]):
+        await handlers.settings_clear(self.ctx, interaction, setting.value)
+
+
 def register(tree, ctx):
     tree.add_command(RunGroup(ctx))
     tree.add_command(DraftGroup(ctx))
     tree.add_command(HelperGroup(ctx))
     tree.add_command(VotesGroup(ctx))
+    tree.add_command(SettingsGroup(ctx))
+    if os.getenv("DEBUG_COMMANDS") == "1":  # testing only, off by default
+        tree.add_command(DebugGroup(ctx))
 
     @tree.command(name="rate", description="Rate the players of a party you finished (private)")
     @app_commands.guild_only()

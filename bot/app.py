@@ -71,6 +71,9 @@ class RaidBot(discord.Client):
         await self.wait_until_ready()
 
     async def on_ready(self):
+        # sync commands
+        # self.tree.clear_commands(guild=None)
+        # await self.tree.sync()
         log.info("Logged in as %s", self.user)
 
     async def on_tree_error(self, interaction, error):

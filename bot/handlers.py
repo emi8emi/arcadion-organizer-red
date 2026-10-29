@@ -5,6 +5,7 @@ Kept free of discord.app_commands decorators so tests can call them with mock in
 import io
 import json
 import re
+from datetime import timedelta
 from pathlib import Path
 from zoneinfo import available_timezones
 
@@ -20,7 +21,7 @@ from .snapshots import ensure_snapshot
 from .solver_io import DraftError, build_signups, fingerprint, import_draft, is_note
 from .posting import post_day_parties
 from .views import AvailabilityView, RateListView
-from .votes import rateable_parties, summary_counts
+from .votes import rateable_parties, slot_end, summary_counts
 
 MAX_DRAFT_BYTES = 2_000_000
 
@@ -40,7 +41,9 @@ def is_organizer(ctx, user):
     perms = getattr(user, "guild_permissions", None)
     if perms is not None and (getattr(perms, "manage_guild", False) or getattr(perms, "administrator", False)):
         return True
-    role_id = ctx.cfg.get("organizer_role_id")
+    guild_id = getattr(getattr(user, "guild", None), "id", None)
+    role_id = (ctx.db.guild_setting(guild_id, "organizer_role_id", ctx.cfg.get("organizer_role_id"))
+               if guild_id else ctx.cfg.get("organizer_role_id"))
     return bool(role_id) and any(getattr(r, "id", None) == int(role_id) for r in getattr(user, "roles", []))
 
 
@@ -160,8 +163,8 @@ async def run_create(ctx, interaction, name, content, start_date, end_date,
              f"Each day's signups close at {cutoff_hm.strftime('%H:%M')} ({tz}) {when}: the first is "
              f"{discord.utils.format_dt(ordered[0], 'F')}, the last {discord.utils.format_dt(ordered[-1], 'F')}. "
              "It is a draft; use /run open to start signups."]
-    if not ctx.cfg.get("reminder_channel_id"):
-        lines.append("⚠ No reminder channel is set (`reminder_channel_id` in config.json or REMINDER_CHANNEL_ID in .env), "
+    if not ctx.db.guild_setting(interaction.guild_id, "reminder_channel_id", ctx.cfg.get("reminder_channel_id")):
+        lines.append("⚠ No reminder channel is set (use /settings set), "
                      "so the bot will not remind organizers to run /draft export after each cutoff.")
     await say(interaction, "\n".join(lines))
 
@@ -497,7 +500,7 @@ async def draft_approve(ctx, interaction, name=None, day=None):
             return await say(interaction, f"**{run['name']}** has no draft to approve. Import one with /draft import.")
         day_key = waiting[0]
     drafts, approved = ctx.db.day_party_counts(run["id"], day_key)
-    channel_id = ctx.cfg.get("parties_channel_id")
+    channel_id = ctx.db.guild_setting(interaction.guild_id, "parties_channel_id", ctx.cfg.get("parties_channel_id"))
     missing = [s for s, ps in ctx.db.approved_slots(run["id"], day_key) if any(not p["message_id"] for p, _ in ps)]
     if drafts == 0 and approved == 0:
         return await say(interaction, f"{day_label(day_key)} has no draft to approve. Import one with /draft import.")
@@ -508,13 +511,13 @@ async def draft_approve(ctx, interaction, name=None, day=None):
     head = (f"Approved {n} parties for **{run['name']}**, {day_label(day_key)}." if drafts
             else f"{day_label(day_key)} was already approved; posting the parties that are missing.")
     if not channel_id:
-        return await say(interaction, head + " No `parties_channel_id` is set in config.json, so nothing was posted. "
+        return await say(interaction, head + " No parties channel is set (use /settings set), so nothing was posted. "
                                               "Players see their party under /myschedule.")
     channel = await ctx.get_channel(int(channel_id)) if ctx.get_channel else None
     if channel is None:
         return await say(interaction, head + f" I could not find channel {channel_id}, so nothing was posted. "
                                               "Players see their party under /myschedule. Run /draft approve again "
-                                              "after fixing parties_channel_id to post them.")
+                                              "after fixing the parties channel with /settings set to post them.")
     posted, errors = await post_day_parties(ctx, run, day_key, channel)
     lines = [head + f" Posted {posted} parties."]
     if errors:
@@ -573,6 +576,113 @@ async def votes_summary(ctx, interaction):
     await say(interaction, first)
     for msg in rest:
         await interaction.followup.send(msg, ephemeral=True)
+
+
+# ---------------------------------------------------------------- /settings (per server)
+
+SETTING_LABELS = {"organizer_role_id": "Organizer role", "reminder_channel_id": "Reminder channel",
+                  "parties_channel_id": "Parties channel"}
+
+
+def _setting_mention(key, value):
+    return f"<@&{value}>" if key == "organizer_role_id" else f"<#{value}>"
+
+
+def settings_lines(ctx, guild_id):
+    lines = []
+    for key, label in SETTING_LABELS.items():
+        own, default = ctx.db.guild_setting(guild_id, key), ctx.cfg.get(key)
+        if own:
+            lines.append(f"**{label}:** {_setting_mention(key, own)}")
+        elif default:
+            lines.append(f"**{label}:** {_setting_mention(key, default)} (bot default)")
+        else:
+            lines.append(f"**{label}:** not set")
+    return lines
+
+
+async def require_manage_server(interaction):
+    perms = interaction.user.guild_permissions
+    if perms.manage_guild or perms.administrator:
+        return True
+    await say(interaction, "Only people with Manage Server can change these settings.")
+    return False
+
+
+async def settings_show(ctx, interaction):
+    if not await require_organizer(ctx, interaction):
+        return
+    await say(interaction, "\n".join(["**Server settings**", *settings_lines(ctx, interaction.guild_id)]))
+
+
+async def settings_set(ctx, interaction, organizer_role=None, reminder_channel=None, parties_channel=None):
+    if not await require_manage_server(interaction):
+        return
+    given = {"organizer_role_id": organizer_role, "reminder_channel_id": reminder_channel,
+             "parties_channel_id": parties_channel}
+    given = {k: v for k, v in given.items() if v is not None}
+    if not given:
+        return await say(interaction, "Pick at least one option to set.\n"
+                         + "\n".join(settings_lines(ctx, interaction.guild_id)))
+    warnings = []
+    me = interaction.guild.me
+    for key, obj in given.items():
+        ctx.db.set_guild_setting(interaction.guild_id, key, obj.id)
+        if key != "organizer_role_id" and me is not None:
+            perms = obj.permissions_for(me)
+            if not perms.view_channel or not perms.send_messages:
+                warnings.append(f"⚠ I cannot send messages in {obj.mention}.")
+            elif key == "parties_channel_id" and not (perms.create_public_threads and perms.send_messages_in_threads):
+                warnings.append(f"⚠ I need Create Public Threads and Send Messages in Threads in {obj.mention}.")
+    await say(interaction, "\n".join(["Saved.", *settings_lines(ctx, interaction.guild_id), *warnings])[:1990])
+
+
+async def settings_clear(ctx, interaction, setting):
+    if not await require_manage_server(interaction):
+        return
+    if setting not in SETTING_LABELS:
+        return await say(interaction, "That is not a setting.")
+    ctx.db.set_guild_setting(interaction.guild_id, setting, None)
+    await say(interaction, "\n".join([f"Cleared **{SETTING_LABELS[setting]}**.", *settings_lines(ctx, interaction.guild_id)]))
+
+
+# ---------------------------------------------------------------- /debug (testing only)
+
+async def debug_complete(ctx, interaction, name=None, day=None):
+    """Testing aid: make the approved slots of a run (or one day) count as just ended, so the
+    "Rate your party" button is posted by the next minute-loop pass and voting can be tried.
+
+    It moves each slot's start into the past, so the end (start + actual_minutes or minutes) is one
+    minute ago. Slots that already ended are left alone."""
+    if not await require_organizer(ctx, interaction):
+        return
+    run = await find_run(ctx, interaction, name)
+    if run is None:
+        return
+    if day:
+        row = await find_day(ctx, interaction, run, day)
+        if row is None:
+            return
+        day_keys = [row["day"]]
+    else:
+        day_keys = [d["day"] for d in ctx.db.run_days(run["id"])]
+    now = ctx.now()
+    moved, already = [], 0
+    for day_key in day_keys:
+        for slot, _parties in ctx.db.approved_slots(run["id"], day_key):
+            minutes = slot["actual_minutes"] or slot["minutes"]      # same rule as votes.slot_end
+            if slot_end(slot) <= now:
+                already += 1
+                continue
+            ctx.db.move_slot_start(slot["id"], now - timedelta(minutes=minutes + 1))
+            moved.append(slot["slot_key"])
+    if not moved and not already:
+        return await say(interaction, "No approved parties to complete. Run /draft approve first.")
+    lines = [f"Marked {len(moved)} slot(s) of **{run['name']}** as ended: {', '.join(moved) or 'none'}."]
+    if already:
+        lines.append(f"{already} slot(s) had already ended and were left alone.")
+    lines.append("The rating button appears in each slot's thread within a minute (or use /rate).")
+    await say(interaction, "\n".join(lines)[:1990])
 
 
 # ---------------------------------------------------------------- /helper
