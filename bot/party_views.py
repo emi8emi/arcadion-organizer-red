@@ -357,9 +357,12 @@ class SwapModal(discord.ui.Modal):
                 "⚠ **Warnings** for swapping <@%s> in:\n%s\nYou can still swap them in." % (v.in_id, "\n".join("• " + w for w in warnings)),
                 view=view, ephemeral=True)
             return
+        await interaction.response.defer()          # the swap makes several Discord calls: answer within 3 s first
         summary = await run_swap(ctx, interaction, v.party_id, params, [])
         v.out_id = v.in_id = None
-        await v.redraw(interaction, summary)
+        v.notice = summary
+        v.sync()
+        await interaction.edit_original_response(content=v.render(), view=v)
 
 
 async def run_swap(ctx, interaction, party_id, params, warnings):
@@ -383,8 +386,9 @@ class ForceSwapView(discord.ui.View):
     @discord.ui.button(label="Swap anyway", style=discord.ButtonStyle.danger)
     async def force(self, interaction, button):
         self.stop()
+        await interaction.response.defer()          # see SwapModal: the swap can take longer than 3 s
         summary = await run_swap(self.ctx, interaction, self.party_id, self.params, self.warnings)
-        await interaction.response.edit_message(content=summary, view=None)
+        await interaction.edit_original_response(content=summary, view=None)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction, button):

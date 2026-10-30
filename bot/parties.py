@@ -179,6 +179,8 @@ async def apply_swap(ctx, guild_id, party_id, out_id, in_id, in_role, actor_id, 
         for action, uid in ((thread.remove_user, out_id), (thread.add_user, in_id)):
             try:
                 await action(discord.Object(id=int(uid)))
+            except discord.NotFound:                    # not a member of the thread / not a real account: nothing to do
+                log.info("user %s not found when changing thread members", uid)
             except Exception as e:
                 log.exception("thread member change failed")
                 problems.append(f"Could not {'remove' if uid == out_id else 'add'} <@{uid}> "

@@ -65,6 +65,9 @@ class FakeInteraction:
                                     roles=[SimpleNamespace(id=r) for r in role_ids])
         self.response, self.followup = FakeResponse(), FakeFollowup()
 
+    async def edit_original_response(self, **kwargs):
+        self.response.edits.append(kwargs)
+
     @property
     def texts(self):
         """Every text the user would see, in order."""

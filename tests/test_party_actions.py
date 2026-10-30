@@ -401,3 +401,39 @@ def test_import_handles_role_changes_bad_files_and_non_organizers(ctx, make_run,
     plain = player(5)
     run_async(handlers.party_import(ctx, plain, edited(ctx, pid)))
     assert "Only organizers" in plain.text
+
+
+def test_a_slow_swap_answers_discord_first_so_the_interaction_cannot_expire(ctx, make_run, clock):
+    run, pid, thread, chan = approved(ctx, make_run)
+    add_player(ctx, run, 30, ["dps"], 0, [S2])
+    panel = party_views.EditPartyView(ctx, pid, "500")
+    panel.out_id, panel.in_id, panel.in_name = "8", "30", "P30"
+    modal = party_views.SwapModal(panel)
+    modal.role._value, modal.text._value = "", ""
+    it = organizer(user_id=500)
+    order = []
+    orig_defer, orig_edit = it.response.defer, it.edit_original_response
+
+    async def defer(**kw):
+        order.append("defer")
+        await orig_defer(**kw)
+
+    async def edit(**kw):
+        order.append("edit")
+        await orig_edit(**kw)
+    it.response.defer, it.edit_original_response = defer, edit
+    run_async(modal.on_submit(it))
+    assert order == ["defer", "edit"] and "Swapped" in it.text
+
+
+def test_a_user_discord_does_not_know_is_not_reported_as_a_problem(ctx, make_run, clock):
+    import discord
+    run, pid, thread, chan = approved(ctx, make_run)
+    add_player(ctx, run, 30, ["tank"], 0, [S2])
+
+    async def unknown(user):
+        raise discord.NotFound(type("R", (), {"status": 404, "reason": "Not Found"})(), "Unknown User")
+    thread.remove_user = unknown
+    _, problems = run_async(parties.apply_swap(ctx, 100, pid, "1", "30", "tank", 500, reason_code="no_show",
+                                               reason_text=""))
+    assert problems == []
