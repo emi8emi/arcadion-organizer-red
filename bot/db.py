@@ -2,6 +2,7 @@
 
 Every method that changes data commits before returning. Times are UTC ISO strings.
 """
+import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,6 +38,11 @@ def join_roles(roles):
 
 def split_roles(text):
     return [r for r in (text or "").split(",") if r]
+
+
+def _member_dict(m):
+    return {"discord_id": m["discord_id"], "role": m["role"], "is_helper": int(m["is_helper"]),
+            "placed_down": int(m["placed_down"]), "distance": int(m["distance"])}
 
 
 class DB:
@@ -80,7 +86,8 @@ class DB:
             for table, col, ddl in (("run_days", "snapshot_utc", "TEXT"),
                                     ("run_days", "snapshot_late", "INTEGER NOT NULL DEFAULT 0"),
                                     ("slots", "thread_id", "TEXT"), ("slots", "rating_posted_utc", "TEXT"),
-                                    ("parties", "message_id", "TEXT")):
+                                    ("parties", "message_id", "TEXT"), ("parties", "ended_utc", "TEXT"),
+                                    ("parties", "ended_by", "TEXT"), ("parties", "rating_posted_utc", "TEXT")):
                 cols = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
                 if col not in cols:                       # database made before this column existed
                     self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
@@ -513,6 +520,16 @@ class DB:
     def confirm_day(self, run_id, day):
         """Draft -> confirmed for one day's parties. Returns how many parties changed."""
         with self.conn:
+            drafts = self.conn.execute(
+                """SELECT * FROM parties WHERE run_id = ? AND status = 'draft'
+                   AND slot_id IN (SELECT id FROM slots WHERE run_id = ? AND substr(slot_key, 1, 10) = ?)""",
+                (run_id, run_id, day)).fetchall()
+            for p in drafts:                       # freeze the solver's version before anyone edits it
+                self.conn.execute(
+                    """INSERT OR IGNORE INTO party_originals (party_id, run_id, slot_id, taken_utc, target_idx, members_json)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (p["id"], run_id, p["slot_id"], iso(datetime.now(timezone.utc)), p["target_idx"],
+                     json.dumps([_member_dict(m) for m in self.party_members(p["id"])])))
             cur = self.conn.execute(
                 """UPDATE parties SET status = 'confirmed' WHERE run_id = ? AND status = 'draft'
                    AND slot_id IN (SELECT id FROM slots WHERE run_id = ? AND substr(slot_key, 1, 10) = ?)""",
@@ -585,10 +602,136 @@ class DB:
         """Every approved party the player is in, newest first (all runs), joined with its slot."""
         return self.conn.execute(
             """SELECT p.id AS party_id, p.run_id, p.party_index, p.status, s.id AS slot_id, s.slot_key,
-                      s.start_utc, s.minutes, s.actual_minutes
+                      s.start_utc, s.minutes, s.actual_minutes, p.ended_utc
                FROM party_members m JOIN parties p ON p.id = m.party_id JOIN slots s ON s.id = p.slot_id
                WHERE m.discord_id = ? AND p.status IN ('confirmed', 'done') ORDER BY s.start_utc DESC, p.id""",
             (str(discord_id),)).fetchall()
+
+    # ------------------------------------------------------------ party ended, edits, standby
+
+    def log_change(self, party, actor_id, kind, now, *, player_id=None, other_player_id=None, reason_code=None,
+                   reason_text=None, warnings=None, detail=None):
+        """Append one row to party_changes (call inside `with self.conn`). Returns its id."""
+        cur = self.conn.execute(
+            """INSERT INTO party_changes (party_id, run_id, slot_id, at_utc, actor_id, kind, player_id,
+                                          other_player_id, reason_code, reason_text, warnings_json, detail_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (party["id"], party["run_id"], party["slot_id"], iso(now), str(actor_id), kind,
+             None if player_id is None else str(player_id), None if other_player_id is None else str(other_player_id),
+             reason_code, reason_text, json.dumps(warnings) if warnings else None,
+             json.dumps(detail) if detail else None))
+        return cur.lastrowid
+
+    def party_changes(self, party_id):
+        return self.conn.execute("SELECT * FROM party_changes WHERE party_id = ? ORDER BY id", (party_id,)).fetchall()
+
+    def change(self, change_id):
+        return self.conn.execute("SELECT * FROM party_changes WHERE id = ?", (change_id,)).fetchone()
+
+    def party_original(self, party_id):
+        row = self.conn.execute("SELECT * FROM party_originals WHERE party_id = ?", (party_id,)).fetchone()
+        return None if row is None else {"target_idx": row["target_idx"], "members": json.loads(row["members_json"])}
+
+    def end_party(self, party_id, now, by, minutes, actor_id=None, override=False):
+        """Mark a party done and log `minutes` of play for each member. `by` is a discord id or 'auto'.
+
+        Returns False when it was already ended. `minutes` is the time played (see parties.minutes_played).
+        """
+        party = self.party(party_id)
+        if party is None or party["ended_utc"] or party["status"] not in ("confirmed", "done"):
+            return False
+        with self.conn:
+            self.conn.execute("UPDATE parties SET status = 'done', ended_utc = ?, ended_by = ? WHERE id = ?",
+                              (iso(now), str(by), party_id))
+            self.conn.executemany(
+                "INSERT OR REPLACE INTO play_log (slot_id, discord_id, minutes) VALUES (?, ?, ?)",
+                [(party["slot_id"], m["discord_id"], minutes) for m in self.party_members(party_id)])
+            if by != "auto":
+                self.log_change(party, actor_id or by, "end_override" if override else "ended", now,
+                                detail={"minutes": minutes})
+        return True
+
+    def undo_end_party(self, party_id, now, actor_id):
+        """Reopen an ended party: back to confirmed, its members' play_log rows removed, rating button reset."""
+        party = self.party(party_id)
+        if party is None or not party["ended_utc"]:
+            return False
+        with self.conn:
+            self.conn.execute(
+                "UPDATE parties SET status = 'confirmed', ended_utc = NULL, ended_by = NULL, rating_posted_utc = NULL "
+                "WHERE id = ?", (party_id,))
+            self.conn.execute(
+                "DELETE FROM play_log WHERE slot_id = ? AND discord_id IN "
+                "(SELECT discord_id FROM party_members WHERE party_id = ?)", (party["slot_id"], party_id))
+            self.log_change(party, actor_id, "end_undo", now)
+        return True
+
+    def mark_party_rating_posted(self, party_id, now):
+        with self.conn:
+            self.conn.execute("UPDATE parties SET rating_posted_utc = ? WHERE id = ?", (iso(now), party_id))
+
+    def parties_to_auto_end(self):
+        """Confirmed parties with their slot's timing; the caller checks whether the slot has run out."""
+        return self.conn.execute(
+            """SELECT p.id, s.start_utc, s.minutes, s.actual_minutes FROM parties p JOIN slots s ON s.id = p.slot_id
+               WHERE p.status = 'confirmed' ORDER BY s.start_utc, p.id""").fetchall()
+
+    def standby_pool(self, slot_id):
+        """Players who could fill in for a slot: ticked it (or were put back on standby) and sit in no approved party then."""
+        rows = self.conn.execute(
+            """SELECT discord_id FROM availability WHERE slot_id = ?
+               UNION SELECT discord_id FROM standby WHERE slot_id = ?""", (slot_id, slot_id)).fetchall()
+        seated = {r[0] for r in self.conn.execute(
+            """SELECT m.discord_id FROM party_members m JOIN parties p ON p.id = m.party_id
+               WHERE p.slot_id = ? AND p.status IN ('confirmed', 'done')""", (slot_id,))}
+        return sorted(r[0] for r in rows if r[0] not in seated)
+
+    def swap_member(self, party_id, out_id, in_id, in_role, actor_id, now, *, reason_code, reason_text,
+                    warnings=None, is_helper=False, source="panel"):
+        """Replace one member of an approved party. Returns the party_changes id.
+
+        The player taken out goes back to standby, loses their play_log row (and any rating they gave or got
+        for that slot, since they were not there); the player put in leaves standby and, if the party already
+        ended, gets the same minutes as the others.
+        """
+        party = self.party(party_id)
+        members = {m["discord_id"]: m for m in self.party_members(party_id)}
+        out_id, in_id = str(out_id), str(in_id)
+        if party is None or out_id not in members or in_id in members:
+            raise ValueError("swap does not apply to this party")
+        with self.conn:
+            minutes = self.conn.execute(
+                "SELECT MAX(minutes) FROM play_log WHERE slot_id = ? AND discord_id IN "
+                "(SELECT discord_id FROM party_members WHERE party_id = ?)", (party["slot_id"], party_id)).fetchone()[0]
+            self.conn.execute("DELETE FROM party_members WHERE party_id = ? AND discord_id = ?", (party_id, out_id))
+            self.conn.execute(
+                "INSERT INTO party_members (party_id, discord_id, role, is_helper, placed_down, distance) "
+                "VALUES (?, ?, ?, ?, 0, 0)", (party_id, in_id, in_role, int(is_helper)))
+            self.conn.execute("DELETE FROM standby WHERE slot_id = ? AND discord_id = ?", (party["slot_id"], in_id))
+            self.conn.execute("INSERT OR IGNORE INTO standby (slot_id, discord_id) VALUES (?, ?)",
+                              (party["slot_id"], out_id))
+            self.conn.execute("DELETE FROM play_log WHERE slot_id = ? AND discord_id = ?", (party["slot_id"], out_id))
+            self.conn.execute("DELETE FROM votes WHERE slot_id = ? AND (voter_id = ? OR target_id = ?)",
+                              (party["slot_id"], out_id, out_id))
+            if party["ended_utc"] and minutes is not None:
+                self.conn.execute("INSERT OR REPLACE INTO play_log (slot_id, discord_id, minutes) VALUES (?, ?, ?)",
+                                  (party["slot_id"], in_id, minutes))
+            return self.log_change(party, actor_id, "swap", now, player_id=out_id, other_player_id=in_id,
+                                   reason_code=reason_code, reason_text=reason_text, warnings=warnings,
+                                   detail={"out_role": members[out_id]["role"], "in_role": in_role, "source": source})
+
+    def set_member_role(self, party_id, discord_id, role, actor_id, now, *, reason_code="other", reason_text="",
+                        warnings=None, source="panel"):
+        party = self.party(party_id)
+        old = {m["discord_id"]: m["role"] for m in self.party_members(party_id)}.get(str(discord_id))
+        if party is None or old is None:
+            raise ValueError("that player is not in the party")
+        with self.conn:
+            self.conn.execute("UPDATE party_members SET role = ? WHERE party_id = ? AND discord_id = ?",
+                              (role, party_id, str(discord_id)))
+            return self.log_change(party, actor_id, "role", now, player_id=discord_id, reason_code=reason_code,
+                                   reason_text=reason_text, warnings=warnings,
+                                   detail={"old_role": old, "new_role": role, "source": source})
 
     # ------------------------------------------------------------ votes (append-only)
 

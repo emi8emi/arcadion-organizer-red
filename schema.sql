@@ -129,6 +129,9 @@ CREATE TABLE IF NOT EXISTS parties (
     status        TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'confirmed', 'done')),
     target_idx    INTEGER,                        -- checkpoint the party is built around
     message_id    TEXT,                           -- the Discord message that announced the party
+    ended_utc     TEXT,                           -- when the party was marked ended (button or automatically)
+    ended_by      TEXT,                           -- discord id of whoever pressed it, or 'auto'
+    rating_posted_utc TEXT,                       -- when this party's "Rate" button went into the thread
     UNIQUE (run_id, slot_id, party_index)
 );
 
@@ -207,3 +210,32 @@ CREATE TABLE IF NOT EXISTS votes (
     created_utc  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS votes_pair ON votes (voter_id, target_id, created_utc);
+
+-- The parties exactly as the solver made them, frozen when /draft approve confirms them. Never edited, so
+-- manual changes can be compared against it later (party_changes holds the changes).
+CREATE TABLE IF NOT EXISTS party_originals (
+    party_id     INTEGER PRIMARY KEY REFERENCES parties(id) ON DELETE CASCADE,
+    run_id       INTEGER NOT NULL,
+    slot_id      INTEGER NOT NULL,
+    taken_utc    TEXT NOT NULL,
+    target_idx   INTEGER,
+    members_json TEXT NOT NULL                    -- [{discord_id, role, is_helper, placed_down, distance}]
+);
+
+-- Everything done to a party after approval: swaps, ended / undone / overridden. Append-only.
+-- reason_code: no_show, cant_make_it, wrong_role, prog_mismatch, other.
+CREATE TABLE IF NOT EXISTS party_changes (
+    id               INTEGER PRIMARY KEY,
+    party_id         INTEGER NOT NULL REFERENCES parties(id) ON DELETE CASCADE,
+    run_id           INTEGER NOT NULL,
+    slot_id          INTEGER NOT NULL,
+    at_utc           TEXT NOT NULL,
+    actor_id         TEXT NOT NULL,
+    kind             TEXT NOT NULL CHECK (kind IN ('swap', 'role', 'ended', 'end_override', 'end_undo')),
+    player_id        TEXT,                        -- swap: the player taken out
+    other_player_id  TEXT,                        -- swap: the player put in
+    reason_code      TEXT,
+    reason_text      TEXT,
+    warnings_json    TEXT,                        -- overridden validation warnings
+    detail_json      TEXT                         -- roles involved, source of the edit ('panel' or 'import')
+);

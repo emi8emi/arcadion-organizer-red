@@ -121,6 +121,17 @@ class DraftGroup(app_commands.Group):
         await handlers.draft_approve(self.ctx, interaction, name, day)
 
 
+class PartyGroup(app_commands.Group):
+    def __init__(self, ctx):
+        super().__init__(name="party", description="Organizers: edit approved parties", guild_only=True)
+        self.ctx = ctx
+
+    @app_commands.command(name="import", description="Apply an edited party JSON (from the Edit composition panel)")
+    @app_commands.describe(party_file="The party-N.json you exported and edited")
+    async def import_(self, interaction: discord.Interaction, party_file: discord.Attachment):
+        await handlers.party_import(self.ctx, interaction, party_file)
+
+
 class VotesGroup(app_commands.Group):
     def __init__(self, ctx):
         super().__init__(name="votes", description="Organizers: ratings between players", guild_only=True)
@@ -193,6 +204,7 @@ def register(tree, ctx):
     tree.add_command(RunGroup(ctx))
     tree.add_command(DraftGroup(ctx))
     tree.add_command(HelperGroup(ctx))
+    tree.add_command(PartyGroup(ctx))
     tree.add_command(VotesGroup(ctx))
     tree.add_command(SettingsGroup(ctx))
     if os.getenv("DEBUG_COMMANDS") == "1":  # testing only, off by default

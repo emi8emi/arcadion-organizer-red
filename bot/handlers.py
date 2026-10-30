@@ -20,6 +20,7 @@ from .services import (snapshot_note, cutoff_of, day_label, day_state, day_summa
 from .snapshots import ensure_snapshot
 from .solver_io import DraftError, build_signups, fingerprint, import_draft, is_note
 from .posting import post_day_parties
+from .parties import apply_swap, plan_import
 from .views import AvailabilityView, RateListView
 from .votes import rateable_parties, slot_end, summary_counts
 
@@ -634,6 +635,8 @@ async def settings_set(ctx, interaction, organizer_role=None, reminder_channel=N
                 warnings.append(f"⚠ I cannot send messages in {obj.mention}.")
             elif key == "parties_channel_id" and not (perms.create_public_threads and perms.send_messages_in_threads):
                 warnings.append(f"⚠ I need Create Public Threads and Send Messages in Threads in {obj.mention}.")
+            elif key == "parties_channel_id" and not perms.manage_threads:
+                warnings.append(f"⚠ I need Manage Threads in {obj.mention} to remove swapped-out players from a party thread.")
     await say(interaction, "\n".join(["Saved.", *settings_lines(ctx, interaction.guild_id), *warnings])[:1990])
 
 
@@ -682,6 +685,50 @@ async def debug_complete(ctx, interaction, name=None, day=None):
     if already:
         lines.append(f"{already} slot(s) had already ended and were left alone.")
     lines.append("The rating button appears in each slot's thread within a minute (or use /rate).")
+    await say(interaction, "\n".join(lines)[:1990])
+
+
+# ---------------------------------------------------------------- /party import
+
+async def party_import(ctx, interaction, party_file):
+    """Organizers: apply an edited party JSON (from the "Export JSON" button) to an approved party."""
+    if not await require_organizer(ctx, interaction):
+        return
+    if party_file.size > 200_000:
+        return await say(interaction, "That file is too big to be a party export.")
+    try:
+        data = json.loads((await party_file.read()).decode("utf-8-sig"))
+    except (ValueError, UnicodeDecodeError):
+        return await say(interaction, "That is not valid JSON.")
+    if not isinstance(data, dict):
+        return await say(interaction, "That is not a party export.")
+    party_id, ops, warnings, errors = plan_import(ctx, data)
+    if errors:
+        return await say(interaction, "Import refused, nothing changed:\n" + "\n".join("• " + e for e in errors))
+    if not ops:
+        return await say(interaction, "Nothing differs from the current party.")
+    if warnings and data.get("force") is not True:
+        return await say(interaction, "Import refused, nothing changed. Warnings (set \"force\": true in the file to "
+                         "accept them):\n" + "\n".join("• " + w for w in warnings))
+    await interaction.response.defer(ephemeral=True)
+    lines, now = [], ctx.now()
+    for op in ops:
+        if op["kind"] == "swap":
+            try:
+                _, problems = await apply_swap(ctx, interaction.guild_id, party_id, op["out"], op["in"], op["role"],
+                                               interaction.user.id, reason_code=op["code"], reason_text=op["text"],
+                                               warnings=warnings or None, source="import")
+            except ValueError:
+                lines.append(f"⚠ Could not swap <@{op['out']}>: the party changed meanwhile.")
+                continue
+            lines.append(f"✅ <@{op['out']}> → <@{op['in']}> as {op['role']}")
+            lines += ["⚠ " + p for p in problems]
+        else:
+            ctx.db.set_member_role(party_id, op["player"], op["role"], interaction.user.id, now,
+                                   warnings=warnings or None, source="import")
+            lines.append(f"✅ <@{op['player']}> is now {op['role']}")
+    from .parties import refresh_party_message
+    await refresh_party_message(ctx, party_id)
     await say(interaction, "\n".join(lines)[:1990])
 
 

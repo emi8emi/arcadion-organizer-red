@@ -13,6 +13,8 @@ from .posting import post_rating_prompts
 from .reminders import send_due_reminders
 from .snapshots import take_due_snapshots
 from .views import RatePartyButton
+from .parties import auto_end_parties
+from .party_views import PartyEditButton, PartyEndedButton, WhySwappedButton
 from .services import Ctx
 
 log = logging.getLogger("raidbot")
@@ -42,7 +44,7 @@ class RaidBot(discord.Client):
             await self.tree.sync()
         if not self.ctx.cfg.get("reminder_channel_id"):
             log.warning("No reminder_channel_id set: the bot will not remind organizers to run /draft export.")
-        self.add_dynamic_items(RatePartyButton)           # the thread buttons keep working after a restart
+        self.add_dynamic_items(RatePartyButton, PartyEndedButton, PartyEditButton, WhySwappedButton)           # the thread buttons keep working after a restart
         self.reminder_loop.start()
 
     async def _get_channel(self, channel_id):
@@ -57,6 +59,10 @@ class RaidBot(discord.Client):
             take_due_snapshots(self.ctx.db, self.ctx.now(), self.ctx.cfg)     # freeze each day's signups at its cutoff
         except Exception:
             log.exception("taking day snapshots failed")
+        try:
+            await auto_end_parties(self.ctx)                                     # slots that ran out of time
+        except Exception:
+            log.exception("auto-ending parties failed")
         try:
             await post_rating_prompts(self.ctx)                                  # slots that just ended
         except Exception:

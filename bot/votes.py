@@ -17,19 +17,26 @@ def slot_end(row):
     return parse_iso(row["start_utc"]) + timedelta(minutes=minutes)
 
 
+def party_end(row):
+    """When ratings open: the moment the party was marked ended if it was (never later than the slot's end),
+    else the slot's end. Rows without an `ended_utc` column count as not ended."""
+    ended = row["ended_utc"] if "ended_utc" in row.keys() else None
+    return min(parse_iso(ended), slot_end(row)) if ended else slot_end(row)
+
+
 def window_closes(row, cfg):
-    return slot_end(row) + timedelta(hours=cfg["vote_window_hours"])
+    return party_end(row) + timedelta(hours=cfg["vote_window_hours"])
 
 
 def rating_open(row, cfg, now):
-    """The slot has ended and the rating window after it is still open."""
-    return slot_end(row) <= now <= window_closes(row, cfg)
+    """The party has ended and the rating window after it is still open."""
+    return party_end(row) <= now <= window_closes(row, cfg)
 
 
 def time_reason(row, cfg, now):
-    """Why ratings are closed for this slot right now, or '' when they are open."""
-    if now < slot_end(row):
-        return "That slot has not ended yet. Ratings open when it does."
+    """Why ratings are closed for this party right now, or '' when they are open."""
+    if now < party_end(row):
+        return "That party has not ended yet. Ratings open when it does."
     if now > window_closes(row, cfg):
         return f"The rating window closed {cfg['vote_window_hours']} hours after the slot ended."
     return ""

@@ -11,6 +11,7 @@ from .db import parse_iso
 from .services import checkpoint_label, day_label
 from .votes import slot_end, window_closes
 from .views import RatePromptView
+from .party_views import PartyActionsView
 
 log = logging.getLogger("raidbot")
 
@@ -27,6 +28,8 @@ def party_message(run, slot, party, members, checkpoints):
     for m in sorted(members, key=lambda m: (order[m["role"]], m["discord_id"])):
         marks = (" · helper" if m["is_helper"] else "") + (" · placed below their prog" if m["placed_down"] else "")
         lines.append(f"• <@{m['discord_id']}> {m['role']}{marks}")
+    if party["ended_utc"]:
+        lines.append(f"✅ Ended {discord.utils.format_dt(parse_iso(party['ended_utc']), 't')}")
     return "\n".join(lines)
 
 
@@ -59,7 +62,7 @@ async def post_day_parties(ctx, run, day, channel):
         for party, members in todo:
             try:
                 msg = await thread.send(party_message(run, slot, party, members, checkpoints),
-                                        allowed_mentions=NO_PING)
+                                        allowed_mentions=NO_PING, view=PartyActionsView(party["id"]))
             except Exception as e:
                 log.exception("could not post party %s of %s", party["party_index"], slot["slot_key"])
                 errors.append(f"{slot['slot_key']} party {party['party_index'] + 1}: {e}")
@@ -80,7 +83,10 @@ async def post_rating_prompts(ctx):
     for slot in ctx.db.slots_awaiting_rating():
         if not (slot_end(slot) <= now <= window_closes(slot, ctx.cfg)) or ctx.get_channel is None:
             continue
-        parties = ctx.db.approved_parties_of_slot(slot["id"])
+        parties = [p for p in ctx.db.approved_parties_of_slot(slot["id"]) if not p["rating_posted_utc"]]
+        if not parties:                                    # every party already got its own button when it ended
+            ctx.db.mark_rating_posted(slot["id"], now)
+            continue
         try:
             thread = await ctx.get_channel(int(slot["thread_id"]))
             if thread is None:
@@ -92,6 +98,8 @@ async def post_rating_prompts(ctx):
         except Exception:
             log.exception("could not post the rating prompt for %s", slot["slot_key"])
             continue
+        for p in parties:
+            ctx.db.mark_party_rating_posted(p["id"], now)
         ctx.db.mark_rating_posted(slot["id"], now)
         sent += 1
     return sent
