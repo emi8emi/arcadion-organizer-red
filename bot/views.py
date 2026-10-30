@@ -214,8 +214,8 @@ class LimitsModal(discord.ui.Modal):
         lim = view.ctx.db.get_limits(view.run_id, view.user_id, view.ctx.cfg)
         self.per_day = discord.ui.TextInput(label="Max parties per day", default=str(lim["max_per_day"]),
                                             max_length=2)
-        # self.per_run = discord.ui.TextInput(label="Max parties for the whole run", default=str(lim["max_per_run"]),
-        #                                     max_length=2)
+        self.per_run = discord.ui.TextInput(label="Max parties for the whole run", default=str(lim["max_per_run"]),
+                                            max_length=2)
         self.drop = discord.ui.TextInput(
             label="OK with playing lower progs (0 = no)", default=str(lim["drop_checkpoints"]),
             max_length=2)

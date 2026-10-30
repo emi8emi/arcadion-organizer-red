@@ -5,7 +5,7 @@
   "last_start": "23:00",
 
   "default_max_per_day": 2,
-  "default_max_per_run": 4,
+  "default_max_per_run": 99,
   "max_run_days": 14,
 
   "party": {"tank": 2, "healer": 2, "dps": 4},
