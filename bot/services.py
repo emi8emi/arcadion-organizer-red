@@ -8,6 +8,7 @@ import discord
 
 from .db import DB, parse_iso, split_roles
 from .grid import GridConfig
+from .characters import characters_line
 
 MAX_PER_DAY = 8
 MAX_PER_RUN = 40
@@ -19,6 +20,8 @@ class Ctx:
     cfg: dict
     grid: GridConfig
     now: Callable[[], datetime] = field(default=lambda: datetime.now(timezone.utc))
+    lodestone: object = None
+    fflogs: object = None
     get_channel: Optional[Callable] = None        # async (channel_id) -> channel or thread; set by the bot
 
 
@@ -131,6 +134,7 @@ def profile_text(ctx, run, discord_id):
     prog = player["prog_index"] if player else None
     lines = [f"Roles: {', '.join(roles) if roles else 'not set'} · Prog: {checkpoint_label(cps, prog)}",
              limits_text(ctx.db.get_limits(run["id"], discord_id, ctx.cfg))]
+    lines.append(characters_line(ctx.db, discord_id))
     if not roles or prog is None:
         lines.append("⚠ Set your roles and prog, or organizers cannot use your signup.")
     return "\n".join(lines)

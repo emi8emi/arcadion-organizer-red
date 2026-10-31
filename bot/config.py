@@ -12,6 +12,7 @@ DEFAULTS = {
     "slot_minutes": 90,
     "day_start": "08:00",
     "last_start": "23:00",
+    "lodestone_region": "na",
     "default_max_per_day": 2,
     "default_max_per_run": 4,
     "max_run_days": 14,

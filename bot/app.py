@@ -5,6 +5,8 @@ import discord
 from discord import app_commands
 from discord.ext import tasks
 
+from bot.fflogs import FFLogsClient
+
 from .commands import register
 from .config import ROOT
 from .db import DB
@@ -16,6 +18,7 @@ from .views import RatePartyButton
 from .parties import auto_end_parties
 from .party_views import PartyEditButton, PartyEndedButton, WhySwappedButton
 from .services import Ctx
+from .lodestone import LodestoneClient
 
 log = logging.getLogger("raidbot")
 
@@ -23,7 +26,10 @@ log = logging.getLogger("raidbot")
 def build_ctx(cfg):
     path = cfg["db_path"]
     path = path if path == ":memory:" or path.startswith("/") else str(ROOT / path)
-    return Ctx(db=DB(path), cfg=cfg, grid=GridConfig.from_config(cfg))
+    fflogs = (FFLogsClient(cfg["fflogs_client_id"], cfg["fflogs_client_secret"])
+        if cfg.get("fflogs_client_id") and cfg.get("fflogs_client_secret") else None)
+    return Ctx(db=DB(path), cfg=cfg, grid=GridConfig.from_config(cfg),
+        lodestone=LodestoneClient(cfg["lodestone_region"]), fflogs=fflogs)
 
 
 class RaidBot(discord.Client):

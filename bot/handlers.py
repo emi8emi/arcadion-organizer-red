@@ -11,6 +11,7 @@ from zoneinfo import available_timezones
 
 import discord
 
+from . import characters as ch
 from . import heatmap
 from .config import ROOT
 from .db import DraftConflict, DuplicateRun, parse_iso
@@ -304,6 +305,7 @@ async def availability(ctx, interaction, timezone=None):
     await interaction.response.send_message(view.render(), view=view, ephemeral=True)
 
 
+
 async def limits(ctx, interaction, max_per_day=None, max_per_run=None, drop_checkpoints=None):
     run = ctx.db.open_run(interaction.guild_id)
     if run is None:
@@ -345,7 +347,8 @@ async def myschedule(ctx, interaction):
         lines.append("Your confirmed parties:")
         for p in mine:
             when = discord.utils.format_dt(parse_iso(p["start_utc"]), "F")
-            lines.append(f"• {when} as {p['role']}")
+            char = ctx.db.chosen_character(run["id"], p["slot_key"][:10], uid)
+            lines.append(f"• {when} as {p['role']}" + (f" ({ch.label(char)})" if char else ""))
     elif ctx.db.parties(run["id"]):
         lines.append("A draft is with the organizers; your parties show up here once they are confirmed.")
     await say(interaction, "\n".join(lines)[:1990])

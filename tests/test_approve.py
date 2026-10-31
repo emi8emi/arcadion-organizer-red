@@ -122,7 +122,7 @@ def test_approve_twice_is_refused_once_everything_is_posted(ctx, make_run):
 def test_without_a_configured_channel_the_day_is_still_confirmed(ctx, make_run):
     run, _ = setup_day(ctx, make_run)
     it = approve(ctx)
-    assert "parties_channel_id" in it.text and "/myschedule" in it.text
+    assert "No parties channel is set" in it.text and "/myschedule" in it.text
     assert {p["status"] for p in ctx.db.parties(run["id"])} == {"confirmed"}
     assert "already approved" in approve(ctx, None, D2).text                 # nothing to retry without a channel
 

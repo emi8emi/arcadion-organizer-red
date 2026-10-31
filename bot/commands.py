@@ -6,8 +6,7 @@ import discord
 from discord import app_commands
 from zoneinfo import available_timezones
 
-from . import handlers
-
+from . import character_handlers, handlers
 
 
 # 1. Cache the sorted list of timezones globally at startup 
@@ -199,6 +198,37 @@ class SettingsGroup(app_commands.Group):
     async def clear(self, interaction: discord.Interaction, setting: app_commands.Choice[str]):
         await handlers.settings_clear(self.ctx, interaction, setting.value)
 
+async def my_character_autocomplete(interaction: discord.Interaction, current: str):
+    """The player's own verified characters (value = the character's row id)."""
+    rows = character_handlers.character_choices(interaction.client.ctx, interaction.user.id)
+    return [app_commands.Choice(name=label[:100], value=cid) for label, cid in rows
+            if current.lower() in label.lower()][:25]
+
+
+class CharacterGroup(app_commands.Group):
+    def __init__(self, ctx):
+        super().__init__(name="character", description="Your FFXIV characters", guild_only=True)
+        self.ctx = ctx
+
+    @app_commands.command(description="Add a character: I give you a code to put in your Lodestone profile")
+    @app_commands.describe(name="Character name, like Y'shtola Rhul", world="World, like Exodus")
+    async def add(self, interaction: discord.Interaction, name: str, world: str):
+        await character_handlers.character_add(self.ctx, interaction, name, world)
+
+    @app_commands.command(description="Check your Lodestone profile for the code and finish adding the character")
+    async def verify(self, interaction: discord.Interaction):
+        await character_handlers.character_verify(self.ctx, interaction)
+
+    @app_commands.command(name="list", description="Your verified characters")
+    async def list_(self, interaction: discord.Interaction):
+        await character_handlers.character_list(self.ctx, interaction)
+
+    @app_commands.command(description="Remove one of your characters")
+    @app_commands.autocomplete(character=my_character_autocomplete)
+    @app_commands.describe(character="The character to remove")
+    async def remove(self, interaction: discord.Interaction, character: int):
+        await character_handlers.character_remove(self.ctx, interaction, character)
+
 
 def register(tree, ctx):
     tree.add_command(RunGroup(ctx))
@@ -207,6 +237,7 @@ def register(tree, ctx):
     tree.add_command(PartyGroup(ctx))
     tree.add_command(VotesGroup(ctx))
     tree.add_command(SettingsGroup(ctx))
+    tree.add_command(CharacterGroup(ctx))
     if os.getenv("DEBUG_COMMANDS") == "1":  # testing only, off by default
         tree.add_command(DebugGroup(ctx))
 

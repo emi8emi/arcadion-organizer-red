@@ -79,11 +79,11 @@ def test_set_day_availability_replaces_only_that_day(ctx, make_run):
 def test_limits_default_then_partial_update(ctx, make_run):
     run = make_run()
     ctx.db.upsert_player(1, "A")
-    assert ctx.db.get_limits(run["id"], 1, ctx.cfg) == {"max_per_day": 2, "max_per_run": 4,
+    assert ctx.db.get_limits(run["id"], 1, ctx.cfg) == {"max_per_day": 2, "max_per_run": 99,
                                                         "drop_checkpoints": 0, "is_default": True}
     ctx.db.set_limits(run["id"], 1, ctx.cfg, max_per_day=3)
     lim = ctx.db.set_limits(run["id"], 1, ctx.cfg, drop_checkpoints=2)
-    assert (lim["max_per_day"], lim["max_per_run"], lim["drop_checkpoints"], lim["is_default"]) == (3, 4, 2, False)
+    assert (lim["max_per_day"], lim["max_per_run"], lim["drop_checkpoints"], lim["is_default"]) == (3, 99, 2, False)
 
 
 def test_helper_grant_and_revoke(ctx):

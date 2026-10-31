@@ -195,20 +195,25 @@ def test_menu_saves_every_click(ctx, make_run):
     run = make_run()
 
     async def scenario():
+        ctx.db.upsert_player(5, "Ann", now=NOW)
+        with ctx.db.conn:                                    # one verified character: no "pick a character" warning
+            ctx.db.conn.execute("INSERT INTO characters (discord_id, lodestone_id, name, world, verified_utc) "
+                                "VALUES ('5', '111', 'Ann Tank', 'Exodus', 'x')")
         it = player(5, "Ann")
         await handlers.availability(ctx, it)
         msg = it.response.sent[0]
         view = msg["view"]
         assert isinstance(view, AvailabilityView) and msg["ephemeral"] is True
-        assert len(view.children) == 6
+        assert len(view.children) == 9           # 3 role toggles, Limits, Done, prog, day, character, slots
         assert [o.value for o in view.prog_select.options] == [str(i) for i in range(19)]
         assert [o.value for o in view.day_select.options] == ["2026-11-01", "2026-11-02", "2026-11-03"]
         assert "⚠ Set your roles and prog" in msg["content"] and msg["content"].count("<t:") == 4   # the picked day's cutoff plus one per day
 
-        view.role_select._values = ["dps", "tank"]
-        await view.role_select.callback(player(5))
+        tank, healer, dps = view.role_buttons
+        for button in (dps, tank):                            # role buttons toggle; green = on
+            await button.callback(player(5))
         assert split_roles(ctx.db.get_player(5)["roles"]) == ["tank", "dps"]
-        assert [o.default for o in view.role_select.options] == [True, False, True]
+        assert [b.style == discord.ButtonStyle.success for b in view.role_buttons] == [True, False, True]
 
         view.prog_select._values = ["11"]
         await view.prog_select.callback(player(5))
@@ -254,7 +259,7 @@ def test_menu_limits_modal_saves_and_validates(ctx, make_run):
         press = player(5)
         await button.callback(press)
         modal = press.response.modals[0]
-        assert (modal.per_day.default, modal.per_run.default, modal.drop.default) == ("2", "4", "0")
+        assert (modal.per_day.default, modal.per_run.default, modal.drop.default) == ("2", "99", "0")
 
         for per_day, per_run, drop, message in [("x", "4", "0", "whole numbers"), ("0", "4", "0", "between 1 and 8"),
                                                 ("5", "4", "0", "cannot be smaller"), ("2", "4", "19", "between 0")]:
@@ -286,8 +291,7 @@ def test_menu_stops_saving_after_the_deadline(ctx, make_run, clock):
         view = it.response.sent[0]["view"]
         clock["now"] = NOW + timedelta(days=10)                 # deadline passes while the menu is open
         late = player(5)
-        view.role_select._values = ["tank"]
-        await view.role_select.callback(late)
+        await view.role_buttons[0].callback(late)
         assert "closed for every day" in late.text and late.response.edits[-1]["view"] is None
         assert ctx.db.get_player(5)["roles"] == ""
     run_async(scenario())
@@ -298,9 +302,9 @@ def test_menu_stops_saving_after_the_deadline(ctx, make_run, clock):
 def test_limits_command_shows_and_changes_limits(ctx, make_run):
     run = make_run()
     it = do(ctx, handlers.limits, player(5))
-    assert "up to 2 per day, 4 per run" in it.text and "defaults" in it.text
+    assert "up to 2 per day, 99 per run" in it.text and "defaults" in it.text
     it = do(ctx, handlers.limits, player(5), 3, None, 2)
-    assert "up to 3 per day, 4 per run" in it.text and "2 checkpoint(s) below" in it.text and "defaults" not in it.text
+    assert "up to 3 per day, 99 per run" in it.text and "2 checkpoint(s) below" in it.text and "defaults" not in it.text
     assert ctx.db.get_limits(run["id"], 5, ctx.cfg)["drop_checkpoints"] == 2
 
 
@@ -308,8 +312,10 @@ def test_limits_command_validates(ctx, make_run):
     make_run()
     for args, message in [((0, None, None), "between 1 and 8"), ((None, 99, None), "between 1 and 40"),
                           ((None, 1, None), "cannot be smaller than your max per day"),
-                          ((5, None, None), "larger than your max per run"), ((None, None, 19), "between 0")]:
+                          ((None, None, 19), "between 0")]:
         assert message in do(ctx, handlers.limits, player(5), *args).text, args
+    do(ctx, handlers.limits, player(5), 2, 4, None)          # the default per-run max is 99, so store a small one first
+    assert "larger than your max per run" in do(ctx, handlers.limits, player(5), 5, None, None).text
 
 
 def test_limits_command_needs_an_open_run(ctx, make_run, clock):

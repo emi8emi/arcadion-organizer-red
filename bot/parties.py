@@ -33,6 +33,16 @@ def name_of(db, discord_id):
     return player["display_name"] if player else str(discord_id)
 
 
+def character_text(char):
+    """'Name @ World', or 'no character' when the player did not pick one."""
+    return "no character" if char is None else f"{char['name']} @ {char['world']}"
+
+
+def character_json(char):
+    return None if char is None else {"name": char["name"], "world": char["world"],
+                                      "lodestone_id": char["lodestone_id"], "fflogs_id": char["fflogs_id"]}
+
+
 def reason_label(code, text):
     label = REASONS.get(code, code or "")
     return f"{label}: {text}" if text and code == "other" else (f"{label}. {text}" if text else label)
@@ -117,7 +127,8 @@ async def refresh_party_message(ctx, party_id):
     run = ctx.db.run(party["run_id"])
     try:
         await thread.get_partial_message(int(party["message_id"])).edit(
-            content=party_message(run, party, party, ctx.db.party_members(party_id), ctx.db.checkpoints(run["fight_id"])),
+            content=party_message(run, party, party, ctx.db.party_members(party_id), ctx.db.checkpoints(run["fight_id"]),
+                                  ctx.db.party_member_characters(party_id)),
             allowed_mentions=NO_PING, view=PartyActionsView(party_id))
     except Exception as e:
         log.exception("could not edit the message of party %s", party_id)
@@ -216,7 +227,9 @@ def party_json(ctx, party_id):
     party = db.party(party_id)
     run = db.run(party["run_id"])
     cps = db.checkpoints(run["fight_id"])
+    chars = db.party_member_characters(party_id)
     member = lambda m: {"player": m["discord_id"], "name": name_of(db, m["discord_id"]),   # noqa: E731
+                        "character": character_json(chars.get(m["discord_id"])),
                         "role": m["role"], "helper": bool(m["is_helper"]), "placed_down": bool(m["placed_down"]),
                         "distance": m["distance"]}
     original = db.party_original(party_id)

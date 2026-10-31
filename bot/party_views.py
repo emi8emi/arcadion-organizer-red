@@ -11,7 +11,7 @@ import discord
 
 from .config import ROLES
 from .db import parse_iso
-from .parties import (REASONS, apply_swap, comp_warnings, dumps, minutes_played, name_of, party_json,
+from .parties import (REASONS, apply_swap, character_text, comp_warnings, dumps, minutes_played, name_of, party_json,
                       post_party_rating_prompt, reason_label, refresh_party_message, swap_warnings)
 
 log = logging.getLogger("raidbot")
@@ -231,7 +231,9 @@ class EditPartyView(discord.ui.View):
         party = db.party(self.party_id)
         lines = [f"**Edit party {party['party_index'] + 1}** · {party['slot_key']}"
                  + (" (already ended; edits still count)" if party["ended_utc"] else "")]
-        lines += [f"• <@{m['discord_id']}> {m['role']}" for m in db.party_members(self.party_id)]
+        chars = db.party_member_characters(self.party_id)
+        lines += [f"• <@{m['discord_id']}> {m['role']} · {character_text(chars.get(m['discord_id']))}"
+                  for m in db.party_members(self.party_id)]
         lines.append(f"Swap out: {f'<@{self.out_id}>' if self.out_id else 'pick someone'} → "
                      f"in: {f'<@{self.in_id}>' if self.in_id else 'pick from standby or anyone'}")
         lines.append("The swapped-out player is told in the parties channel and can read the reason you give, "

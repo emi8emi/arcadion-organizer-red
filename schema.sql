@@ -86,6 +86,8 @@ CREATE TABLE IF NOT EXISTS players (
     updated_utc   TEXT
 );
 
+-- characters, character_claims and signup_characters are created by bot/characters.py (ensure_schema).
+
 CREATE TABLE IF NOT EXISTS availability (
     run_id      INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
     discord_id  TEXT NOT NULL REFERENCES players(discord_id),

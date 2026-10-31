@@ -92,8 +92,7 @@ def test_closed_day_is_locked_but_other_days_still_save(ctx, make_run, clock):
         assert late.response.edits[-1]["view"] is view              # the menu stays open
 
         roles = player(5)                                           # roles and prog are not per day
-        view.role_select._values = ["tank"]
-        await view.role_select.callback(roles)
+        await view.role_buttons[0].callback(roles)                  # the Tank toggle
         assert ctx.db.get_player(5)["roles"] == "tank"
 
         view.day_select._values = ["2026-11-02"]

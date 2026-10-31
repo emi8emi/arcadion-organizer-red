@@ -78,6 +78,8 @@ class DB:
                               CASE o.answer WHEN 'yes' THEN 'like' WHEN 'no' THEN 'dislike' ELSE 'neutral' END,
                               o.created_utc FROM votes_old o JOIN slots s ON s.id = o.slot_id""")
                 self.conn.execute("DROP TABLE votes_old")
+        from .characters import ensure_schema          # characters tables, and the move off the soft-link version
+        ensure_schema(self.conn)
         with self.conn:
             self.conn.execute(
                 """CREATE TABLE IF NOT EXISTS guild_settings (
@@ -85,6 +87,7 @@ class DB:
                        reminder_channel_id TEXT, parties_channel_id TEXT)""")
             for table, col, ddl in (("run_days", "snapshot_utc", "TEXT"),
                                     ("run_days", "snapshot_late", "INTEGER NOT NULL DEFAULT 0"),
+                                    ("day_snapshots", "character_id", "INTEGER REFERENCES characters(id) ON DELETE SET NULL"),
                                     ("slots", "thread_id", "TEXT"), ("slots", "rating_posted_utc", "TEXT"),
                                     ("parties", "message_id", "TEXT"), ("parties", "ended_utc", "TEXT"),
                                     ("parties", "ended_by", "TEXT"), ("parties", "rating_posted_utc", "TEXT")):
@@ -333,10 +336,12 @@ class DB:
                 lim = self.get_limits(run_id, did, cfg)
                 self.conn.execute(
                     """INSERT INTO day_snapshots (run_id, day, discord_id, display_name, roles, prog_index,
-                                                  max_per_day, max_per_run, drop_checkpoints, taken_utc, late)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                                  max_per_day, max_per_run, drop_checkpoints, taken_utc, late,
+                                                  character_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (run_id, day, did, p["display_name"], p["roles"], p["prog_index"], lim["max_per_day"],
-                     lim["max_per_run"], lim["drop_checkpoints"], iso(now), int(late)))
+                     lim["max_per_run"], lim["drop_checkpoints"], iso(now), int(late),
+                     self._live_character_id(run_id, day, did)))
             self.conn.execute("UPDATE run_days SET snapshot_utc = ?, snapshot_late = ? WHERE run_id = ? AND day = ?",
                               (iso(now), int(late), run_id, day))
         return True
@@ -353,6 +358,43 @@ class DB:
             """SELECT d.*, r.guild_id, r.name AS run_name FROM run_days d JOIN runs r ON r.id = d.run_id
                WHERE r.status IN ('open', 'closed') AND d.snapshot_utc IS NULL AND d.exported_utc IS NULL
                  AND d.cutoff_utc <= ? ORDER BY d.cutoff_utc, r.id, d.day""", (iso(now),)).fetchall()
+
+    # ------------------------------------------------------------ characters on signups
+
+    def _live_character_id(self, run_id, day, discord_id):
+        """The character a player would bring on `day` right now: their pick, else their only character."""
+        row = self.conn.execute(
+            "SELECT character_id FROM signup_characters WHERE run_id = ? AND day = ? AND discord_id = ?",
+            (run_id, day, str(discord_id))).fetchone()
+        if row and row["character_id"]:
+            return row["character_id"]
+        own = self.conn.execute("SELECT id FROM characters WHERE discord_id = ?", (str(discord_id),)).fetchall()
+        return own[0]["id"] if len(own) == 1 else None
+
+    def chosen_character(self, run_id, day, discord_id):
+        """The `characters` row a player brings on a day, or None. Once the day's snapshot exists the choice
+        is the one frozen in it (so adding an alt later cannot change a day that already closed)."""
+        snap = self.conn.execute(
+            "SELECT character_id FROM day_snapshots WHERE run_id = ? AND day = ? AND discord_id = ?",
+            (run_id, day, str(discord_id))).fetchone()
+        char_id = snap["character_id"] if snap else self._live_character_id(run_id, day, discord_id)
+        if not char_id:
+            return None
+        return self.conn.execute("SELECT * FROM characters WHERE id = ?", (char_id,)).fetchone()
+
+    def set_signup_character(self, run_id, days, discord_id, character_id):
+        with self.conn:
+            self.conn.executemany(
+                """INSERT INTO signup_characters (run_id, day, discord_id, character_id) VALUES (?, ?, ?, ?)
+                   ON CONFLICT (run_id, day, discord_id) DO UPDATE SET character_id = excluded.character_id""",
+                [(run_id, day, str(discord_id), character_id) for day in days])
+
+    def party_member_characters(self, party_id):
+        """{discord_id: characters row or None} for a party, using the character each member brought that day."""
+        party = self.party(party_id)
+        day = party["slot_key"][:10]
+        return {m["discord_id"]: self.chosen_character(party["run_id"], day, m["discord_id"])
+                for m in self.party_members(party_id)}
 
     # ------------------------------------------------------------ limits
 

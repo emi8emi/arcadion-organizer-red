@@ -1,6 +1,7 @@
 """The /availability menu: roles, prog checkpoint, day, slots, limits. Every click saves at once."""
 import discord
 
+from . import characters as ch
 from .config import ROLES
 from .db import parse_iso, split_roles
 from .votes import cast_vote, current_rating, time_reason
@@ -19,12 +20,15 @@ class AvailabilityView(discord.ui.View):
         self.day = next((d["day"] for d in ctx.db.run_days(run["id"])
                          if day_accepts_signups(ctx, run, d)), self.days[0])     # first day still open
 
-        self.role_select = RoleSelect()
+        # Discord allows 5 rows, and a select takes a whole row, so roles are toggle buttons that share row 0
+        # with Limits and Done. Rows 1-4: prog, day, the character for that day, the day's slots.
+        self.role_buttons = [RoleButton(r) for r in ROLES]
         self.prog_select = ProgSelect()
         self.day_select = DaySelect()
+        self.character_select = CharacterSelect()
         self.slot_select = SlotSelect()
-        for item in (self.role_select, self.prog_select, self.day_select, self.slot_select,
-                     LimitsButton(), DoneButton()):
+        for item in (*self.role_buttons, LimitsButton(), DoneButton(), self.prog_select, self.day_select,
+                     self.character_select, self.slot_select):
             self.add_item(item)
         self.sync()
 
@@ -42,8 +46,8 @@ class AvailabilityView(discord.ui.View):
         prog = player["prog_index"] if player else None
         ticked = set(db.ticked_keys(self.run_id, self.user_id))
 
-        self.role_select.options = [discord.SelectOption(label=r.capitalize(), value=r, default=r in roles)
-                                    for r in ROLES]
+        for b in self.role_buttons:
+            b.style = discord.ButtonStyle.success if b.role in roles else discord.ButtonStyle.secondary
         self.prog_select.options = [
             discord.SelectOption(label=checkpoint_label(self.checkpoints, c["idx"])[:100], value=str(c["idx"]),
                                  default=(c["idx"] == prog)) for c in self.checkpoints[:25]]
@@ -65,6 +69,32 @@ class AvailabilityView(discord.ui.View):
         self.slot_select.disabled = not day_open                  # a closed day keeps its ticks, read-only
         self.slot_select.placeholder = (f"Slots you can play on {day_label(self.day)} ({tz_name})" if day_open
                                         else f"{day_label(self.day)} is closed: its slots are locked")
+        self._sync_character(day_open)
+
+    def _sync_character(self, day_open):
+        """The character dropdown shows the player's verified characters, with the one used on the edited day selected."""
+        mine = ch.list_characters(self.ctx.db, self.user_id)
+        if not mine:
+            self.character_select.options = [discord.SelectOption(
+                label="No verified character yet", value="-", description="Use /character add, then /character verify")]
+            self.character_select.disabled = True
+            self.character_select.placeholder = "Character (none verified yet)"
+            return
+        picked = self.ctx.db.chosen_character(self.run_id, self.day, self.user_id)
+        self.character_select.options = [
+            discord.SelectOption(label=ch.label(c)[:100], value=str(c["id"]),
+                                 default=bool(picked) and picked["id"] == c["id"]) for c in mine]
+        self.character_select.disabled = not day_open               # a closed day keeps its frozen character
+        self.character_select.placeholder = (f"Which character do you play on {day_label(self.day)}?" if day_open
+                                             else f"{day_label(self.day)} is closed: its character is locked")
+
+    def _character_line(self):
+        char = self.ctx.db.chosen_character(self.run_id, self.day, self.user_id)
+        if char:
+            return f"Character on {day_label(self.day)}: **{ch.label(char)}**"
+        if not ch.list_characters(self.ctx.db, self.user_id):
+            return "⚠ You have no verified character yet: use /character add. Organizers will see you without one."
+        return f"⚠ Pick which character you play on {day_label(self.day)} (the Character menu)."
 
     def _day_description(self, run, day_row, n_ticked):
         """Plain text for the day dropdown (Discord timestamps do not render inside dropdowns)."""
@@ -98,6 +128,7 @@ class AvailabilityView(discord.ui.View):
                  f"Your prog right now: **{checkpoint_label(self.checkpoints, prog)}**. "
                  "It changes often, so check it before each day closes.",
                  profile_text(self.ctx, run, self.user_id),
+                 self._character_line(),
                  "Pick roles and your prog, then a day and the slots you can play. It saves as you click.",
                  "Cutoffs:", *day_lines,
                  f"Slots ticked ({len(keys)}), in your local time:"]
@@ -138,16 +169,25 @@ class AvailabilityView(discord.ui.View):
         return str(interaction.user.id) == self.user_id
 
 
-class RoleSelect(discord.ui.Select):
-    def __init__(self):
-        super().__init__(placeholder="Roles you can play", min_values=1, max_values=len(ROLES),
-                         options=[discord.SelectOption(label=r, value=r) for r in ROLES], row=0)
+class RoleButton(discord.ui.Button):
+    """One toggle per role: green = you can play it. At least one role stays on."""
+
+    def __init__(self, role):
+        super().__init__(label="DPS" if role == "dps" else role.capitalize(), style=discord.ButtonStyle.secondary,
+                         row=0)
+        self.role = role
 
     async def callback(self, interaction):
         v = self.view
-        if await v.guard(interaction):
-            v.ctx.db.upsert_player(v.user_id, v.display_name, roles=self.values, now=v.ctx.now())
-            await v.refresh_after_edit(interaction)
+        if not await v.guard(interaction):
+            return
+        player = v.ctx.db.get_player(v.user_id)
+        roles = set(split_roles(player["roles"]) if player else [])
+        roles = roles - {self.role} if self.role in roles else roles | {self.role}
+        if not roles:
+            return await v.refresh(interaction, extra="\n⚠ Keep at least one role on.")
+        v.ctx.db.upsert_player(v.user_id, v.display_name, roles=sorted(roles), now=v.ctx.now())
+        await v.refresh_after_edit(interaction)
 
 
 class ProgSelect(discord.ui.Select):
@@ -173,10 +213,28 @@ class DaySelect(discord.ui.Select):
         await v.refresh(interaction)
 
 
+class CharacterSelect(discord.ui.Select):
+    """Which verified character the player brings on the day being edited (saved per day)."""
+
+    def __init__(self):
+        super().__init__(placeholder="Character", min_values=1, max_values=1,
+                         options=[discord.SelectOption(label="loading", value="0")], row=3)
+
+    async def callback(self, interaction):
+        v = self.view
+        if await v.guard_day(interaction):
+            char = ch.get_character(v.ctx.db, v.user_id, int(self.values[0]))     # must be one of their own
+            if char is None:
+                return await v.refresh(interaction, extra="\n⚠ That is not one of your verified characters.")
+            v.ctx.db.upsert_player(v.user_id, v.display_name, now=v.ctx.now())
+            v.ctx.db.set_signup_character(v.run_id, [v.day], v.user_id, char["id"])
+            await v.refresh(interaction)
+
+
 class SlotSelect(discord.ui.Select):
     def __init__(self):
         super().__init__(placeholder="Slots", min_values=0, max_values=1,
-                         options=[discord.SelectOption(label="loading", value="0")], row=3)
+                         options=[discord.SelectOption(label="loading", value="0")], row=4)
 
     async def callback(self, interaction):
         v = self.view
@@ -188,7 +246,7 @@ class SlotSelect(discord.ui.Select):
 
 class LimitsButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="Limits and playing lower", style=discord.ButtonStyle.secondary, row=4)
+        super().__init__(label="Limits", style=discord.ButtonStyle.secondary, row=0)
 
     async def callback(self, interaction):
         v = self.view
@@ -198,7 +256,7 @@ class LimitsButton(discord.ui.Button):
 
 class DoneButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="Done", style=discord.ButtonStyle.success, row=4)
+        super().__init__(label="Done", style=discord.ButtonStyle.primary, row=0)
 
     async def callback(self, interaction):
         v = self.view

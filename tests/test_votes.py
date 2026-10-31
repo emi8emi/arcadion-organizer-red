@@ -291,16 +291,15 @@ def test_the_rating_view_saves_each_click_and_shows_the_current_rating(ctx, make
         it = player(1)
         await open_rating(ctx, it, pa)
         view = it.response.sent[0]["view"]
-        assert all(b.disabled for b in view.buttons)                                 # nobody picked yet
-        assert 7 == len(view.member_select.options) and "1" not in [o.value for o in view.member_select.options]
-        view.member_select._values = ["2"]
-        step = player(1)
-        await view.member_select.callback(step)
-        assert not any(b.disabled for b in view.buttons) and "**Player 2**: your rating is **Neutral**" in step.response.edits[-1]["content"]
-        for vote, label in (("like", "Like"), ("dislike", "Dislike"), ("neutral", "Neutral")):
+        emoji = {"like": "👍", "dislike": "👎", "neutral": "😐"}
+        assert len(view.buttons) == 7 and "1" not in [b.target_id for b in view.buttons]      # everyone but me
+        assert all(view.ratings[b.target_id] == "neutral" for b in view.buttons)               # nobody rated yet
+        button = next(b for b in view.buttons if b.target_id == "2")
+        for vote in ("like", "dislike", "neutral"):                                            # one tap = the next rating
             click = player(1)
-            await next(b for b in view.buttons if b.vote == vote).callback(click)
-            assert f"your rating is **{label}**" in click.response.edits[-1]["content"]
+            await button.callback(click)
+            assert view.ratings["2"] == vote and str(button.emoji) == emoji[vote]
+            assert "Rate your party" in click.response.edits[-1]["content"]
             assert current_rating(ctx.db, "1", "2", ctx.now()) == vote
         assert ctx.db.conn.execute("SELECT COUNT(*) FROM votes").fetchone()[0] == 3
         done = player(1)
@@ -320,8 +319,10 @@ def test_the_select_shows_my_current_rating_per_member(ctx, make_run, clock):
         it = player(1)
         await open_rating(ctx, it, pa)
         view = it.response.sent[0]["view"]
-        desc = {o.value: o.description for o in view.member_select.options}
-        assert desc["3"] == "healer · you rated: Dislike" and desc["2"] == "tank · you rated: Neutral"
+        import discord
+        assert view.ratings["3"] == "dislike" and view.ratings["2"] == "neutral"
+        b3 = next(b for b in view.buttons if b.target_id == "3")
+        assert b3.label == "Player 3 · healer" and str(b3.emoji) == "👎" and b3.style == discord.ButtonStyle.danger
     run_async(scenario())
 
 
@@ -333,11 +334,9 @@ def test_a_click_after_the_window_closed_saves_nothing(ctx, make_run, clock):
         it = player(1)
         await open_rating(ctx, it, pa)
         view = it.response.sent[0]["view"]
-        view.member_select._values = ["2"]
-        await view.member_select.callback(player(1))
-        at(clock, "2026-11-20T00:00")
+        at(clock, "2026-11-20T00:00")                                               # the window closes while it is open
         click = player(1)
-        await next(b for b in view.buttons if b.vote == "like").callback(click)
+        await next(b for b in view.buttons if b.target_id == "2").callback(click)
         assert "Nothing was saved" in click.response.edits[-1]["content"]
     run_async(scenario())
     assert ctx.db.conn.execute("SELECT COUNT(*) FROM votes").fetchone()[0] == 0
@@ -443,16 +442,10 @@ def test_rating_strings_and_components_respect_discords_limits(ctx, make_run, cl
         await open_rating(ctx, it, pid)
         view = it.response.sent[0]["view"]
         assert len(it.response.sent[0]["content"]) <= 2000
-        view.member_select._values = [ids[1]]
         step = player(1)
-        await view.member_select.callback(step)
+        await next(b for b in view.buttons if b.target_id == ids[1]).callback(step)
         assert len(step.response.edits[-1]["content"]) <= 2000
-        rows = {c.row for c in view.children}
-        assert rows <= {0, 1} and len(view.children) <= 5 * 5
-        sel = view.member_select
-        assert len(sel.placeholder) <= 150 and len(sel.options) <= 25
-        for o in sel.options:
-            assert 1 <= len(o.label) <= 100 and len(o.description) <= 100 and len(o.value) <= 100
+        assert {c.row for c in view.children} <= {0, 1, 2, 3, 4} and len(view.children) <= 5 * 5
         for b in view.buttons:
             assert 1 <= len(b.label) <= 80
         many = [{"id": n, "party_index": n} for n in range(1, 40)]

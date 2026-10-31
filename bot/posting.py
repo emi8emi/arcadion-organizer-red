@@ -18,8 +18,10 @@ log = logging.getLogger("raidbot")
 NO_PING = discord.AllowedMentions(users=True, roles=False, everyone=False)
 
 
-def party_message(run, slot, party, members, checkpoints):
-    """The announcement for one party: members as mentions with roles, target, helper and placed-down marks."""
+def party_message(run, slot, party, members, checkpoints, characters=None):
+    """The announcement for one party: members as mentions with roles, target, helper and placed-down marks.
+
+    `characters` is {discord_id: characters row or None} (db.party_member_characters); without it no character is shown."""
     start = parse_iso(slot["start_utc"])
     lines = [f"**Party {party['party_index'] + 1}** · {discord.utils.format_dt(start, 'F')} "
              f"({discord.utils.format_dt(start, 'R')})",
@@ -27,7 +29,11 @@ def party_message(run, slot, party, members, checkpoints):
     order = {r: i for i, r in enumerate(ROLES)}
     for m in sorted(members, key=lambda m: (order[m["role"]], m["discord_id"])):
         marks = (" · helper" if m["is_helper"] else "") + (" · placed below their prog" if m["placed_down"] else "")
-        lines.append(f"• <@{m['discord_id']}> {m['role']}{marks}")
+        who = ""
+        if characters is not None:
+            c = characters.get(m["discord_id"])
+            who = f" · {c['name']} @ {c['world']}" if c else " · no character"
+        lines.append(f"• <@{m['discord_id']}> {m['role']}{who}{marks}")
     if party["ended_utc"]:
         lines.append(f"✅ Ended {discord.utils.format_dt(parse_iso(party['ended_utc']), 't')}")
     return "\n".join(lines)
@@ -61,7 +67,8 @@ async def post_day_parties(ctx, run, day, channel):
             continue
         for party, members in todo:
             try:
-                msg = await thread.send(party_message(run, slot, party, members, checkpoints),
+                msg = await thread.send(party_message(run, slot, party, members, checkpoints,
+                                                      ctx.db.party_member_characters(party["id"])),
                                         allowed_mentions=NO_PING, view=PartyActionsView(party["id"]))
             except Exception as e:
                 log.exception("could not post party %s of %s", party["party_index"], slot["slot_key"])
