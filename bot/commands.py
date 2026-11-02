@@ -181,7 +181,7 @@ class DebugGroup(app_commands.Group):
     @app_commands.command(name="score", description="Testing: score a player's FFLogs and set their prog to the highest found")
     @app_commands.describe(member="Whose logs", mode="normal ignores the cleanup tag; consistent requires cleanup points to pass the check",
                            count="Most reports to read (default 10)",
-                           hours="Only reports from the last N hours (default 24, 0 = no limit)",
+                           hours="Only reports from the last N hours (default 48, 0 = no limit)",
                            character="Which character, if they have several",
                            reset="Throw away stored scores and start over",
                            content="The fight (optional while there is only one)")

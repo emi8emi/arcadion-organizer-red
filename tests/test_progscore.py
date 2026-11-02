@@ -222,7 +222,7 @@ def test_default_fetch_reads_only_the_last_24_hours(ctx):
 
 def test_no_reports_in_the_window_skips_the_scorer(ctx, monkeypatch):
     synced(ctx)
-    ctx.fflogs = FakeLogs([40])
+    ctx.fflogs = FakeLogs([60])
     add_char(ctx)
 
     async def never(*a, **k):
@@ -233,12 +233,31 @@ def test_no_reports_in_the_window_skips_the_scorer(ctx, monkeypatch):
     assert "nothing in this window" in it.text
 
 
-def test_cleanup_point_counts_when_the_next_point_was_reached(ctx):
+def test_cleanup_point_counts_when_the_next_point_was_reached_consistently(ctx):
     doc = doc_of(ctx)
-    skipping = [i for i in range(11) if i != 9]                         # Healer gaol (10) reached, Gaols (9) itself not seen
+    skipping = [i for i in range(11) if i != 9]                         # Healer gaol (10) in every pull, Gaols (9) never seen
     state = make_state(doc, [skipping] * 5)
     assert progscore.failed_cleanup_points(doc, state) == set()
-    assert 5 in progscore.adjusted_reached(doc, [0, 1, 2, 3, 4, 6])          # Ifrit: Eruption baits implies Nails
+    assert progscore.effective_highest(doc, state, "consistent")["idx"] == 10
+
+
+def test_passing_on_once_or_twice_does_not_count(ctx):
+    doc = doc_of(ctx)
+    lucky = [i for i in range(11) if i != 9]                            # went past Gaols twice, never cleaned it
+    state = make_state(doc, [lucky] * 2 + [UP_TO_TITAN] * 3)
+    assert progscore.failed_cleanup_points(doc, state) == {9}
+    best = progscore.effective_highest(doc, state, "consistent")
+    assert best["idx"] == 8                                             # not Healer gaol (10)
+    assert progscore.effective_highest(doc, state, "normal")["idx"] == 10
+
+
+def test_failed_cleanup_only_blocks_characters_below_it(ctx):
+    doc = doc_of(ctx)
+    lucky = [i for i in range(11) if i != 9]
+    state = make_state(doc, [lucky] * 2 + [UP_TO_TITAN] * 3)
+    assert progscore.effective_highest(doc, state, "consistent", current=8)["idx"] == 8
+    assert progscore.effective_highest(doc, state, "consistent", current=9)["idx"] == 10   # already past Gaols
+    assert progscore.effective_highest(doc, state, "consistent", current=None)["idx"] == 8
 
 
 def test_the_clear_point_checks_for_a_kill(ctx):

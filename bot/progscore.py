@@ -6,8 +6,9 @@ stdlib-only package that is copied here unchanged.
 Modes for points tagged `cleanup` (see `effective_highest`):
   normal       the tag is ignored: the highest point reached in any pull counts.
   consistent   a cleanup point only counts when the tag check passed for it (reached in at least `min` of the
-               most recent `of` pulls, 3 of 5 unless the prog point file says otherwise). A pull that went on to
-               the next non-cleanup point counts as having reached the cleanup point too.
+               most recent `of` pulls, 3 of 5 unless the prog point file says otherwise), or when the next
+               non-cleanup point was reached that consistently. A failed cleanup point blocks itself and everything
+               after it, but only for a character whose current prog is below it.
 """
 import json
 from datetime import datetime, timedelta, timezone
@@ -123,23 +124,33 @@ def save_state(db, char_id, encounter, state, now):
 
 # ------------------------------------------------------------------ the two modes
 
-def adjusted_reached(doc, reached, tag=CLEANUP_TAG):
-    """A pull that got to the next point without the cleanup tag also counts as having reached the cleanup
-    point before it (you only move on once the cleanup is done)."""
-    out, top = set(reached), max(reached, default=-1)
+def _next_point(doc, pt, tag):
+    """idx of the first point after `pt` that does not carry `tag`, or None."""
+    return min((q["idx"] for q in doc["points"] if q["idx"] > pt["idx"] and tag not in q["tags"]), default=None)
+
+
+def cleanup_report(doc, state, tag=CLEANUP_TAG, default_rule=(3, 5)):
+    """Per tagged point: is it consistent? -> {'consistent', 'points': [{idx, name, phase, reached, of, need, ok, via_next}]}
+    or None when nothing carries the tag.
+
+    A point is ok when it was reached in at least `min` of the most recent `of` pulls, OR when the next
+    non-tagged point was reached that consistently (moving on for good means the cleanup was done). Passing to
+    the next point only once or twice does not count: the player may have been lucky, or everyone was dead."""
+    pulls = sorted((p for p in state["pulls"].values() if "reached" in p), key=lambda p: p.get("at") or 0, reverse=True)
+    out = {"consistent": True, "points": []}
     for pt in doc["points"]:
-        if tag in pt["tags"]:
-            nxt = min((q["idx"] for q in doc["points"] if q["idx"] > pt["idx"] and tag not in q["tags"]), default=None)
-            if nxt is not None and top >= nxt:
-                out.add(pt["idx"])
-    return sorted(out)
-
-
-def cleanup_report(doc, state, tag=CLEANUP_TAG):
-    """The tag report for `tag`, recomputed from the stored pulls with the next-point rule above.
-    -> {'consistent': bool, 'points': [{idx, name, phase, reached, of, need, ok}]} or None if nothing is tagged."""
-    pulls = [{**p, "reached": adjusted_reached(doc, p["reached"], tag)} for p in state["pulls"].values() if "reached" in p]
-    return progpoints.tag_report(doc, pulls).get(tag)
+        if tag not in pt["tags"]:
+            continue
+        rule = doc.get("tag_rules", {}).get(tag) or {"min": default_rule[0], "of": default_rule[1]}
+        window = pulls[:rule["of"]]
+        own = sum(1 for p in window if pt["idx"] in p["reached"])
+        nxt = _next_point(doc, pt, tag)
+        via = sum(1 for p in window if nxt is not None and max(p["reached"], default=-1) >= nxt)
+        ok = own >= rule["min"] or via >= rule["min"]
+        out["points"].append({"idx": pt["idx"], "name": pt["name"], "phase": pt["phase"], "reached": own,
+                              "of": len(window), "need": rule["min"], "ok": ok, "via_next": via})
+        out["consistent"] = out["consistent"] and ok
+    return out if out["points"] else None
 
 
 def failed_cleanup_points(doc, state, tag=CLEANUP_TAG):
@@ -148,21 +159,23 @@ def failed_cleanup_points(doc, state, tag=CLEANUP_TAG):
     return {p["idx"] for p in rep["points"] if not p["ok"]} if rep else set()
 
 
-def effective_highest(doc, state, mode="normal"):
+def effective_highest(doc, state, mode="normal", current=None):
     """{'idx', 'phase', 'name', 'pull'} of the player's highest point under `mode`, or None if none was reached.
 
-    'consistent' skips cleanup points that failed the consistency check; everything else counts as usual,
-    including points after a failed cleanup point."""
+    'consistent': a cleanup point that failed its check blocks itself and everything after it, so the result
+    is the highest point reached before it. This only applies while the character's current prog (`current`,
+    a checkpoint idx or None) is below that cleanup point; someone already past it has proven it before."""
     if mode not in MODES:
         raise ValueError(f"mode must be one of {', '.join(MODES)}")
     if mode == "normal":
         return state.get("highest")
-    skip = failed_cleanup_points(doc, state)
+    blocking = [i for i in failed_cleanup_points(doc, state) if current is None or current < i]
+    cap = min(blocking, default=None)
     info = {p["idx"]: p for p in doc["points"]}
     best = None
     for key, pull in state["pulls"].items():
         for idx in pull.get("reached", []):
-            if idx not in skip and (best is None or idx > best["idx"]):
+            if (cap is None or idx < cap) and (best is None or idx > best["idx"]):
                 best = {"idx": idx, "phase": info[idx]["phase"], "name": info[idx]["name"], "pull": key}
     return best
 
@@ -171,7 +184,8 @@ def cleanup_lines(doc, state):
     """Human-readable consistency of the cleanup points, one per line (empty when none are tagged)."""
     rep = cleanup_report(doc, state)
     return [f"{'✅' if p['ok'] else '❌'} {p['phase']} {p['name']}: reached in {p['reached']} of the last "
-            f"{p['of']} pulls (needs {p['need']})" for p in rep["points"]] if rep else []
+            f"{p['of']} pulls (needs {p['need']}), went on to the next point in {p['via_next']}"
+            for p in rep["points"]] if rep else []
 
 
 # ------------------------------------------------------------------ confirmed prog (never goes down)

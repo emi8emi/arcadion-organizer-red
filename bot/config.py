@@ -26,6 +26,7 @@ DEFAULTS = {
     "vote_window_hours": 72,         # how long after a slot ends its players may rate each other
     "vote_expiry_days": 90,          # older votes stop counting (export and /votes summary)
     "vote_floor": 3,                 # /votes summary hides players with fewer votes than this
+    "prog_fetch_hours": 48,          # /debug score reads FFLogs reports from this many hours back (0 = no limit)
     "organizer_role_id": None,
     "db_path": "raidbot.sqlite3",
     "export_dir": "exports",
