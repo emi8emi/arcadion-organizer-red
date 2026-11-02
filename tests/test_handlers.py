@@ -256,24 +256,38 @@ def test_menu_limits_modal_saves_and_validates(ctx, make_run):
         await handlers.availability(ctx, it)
         view = it.response.sent[0]["view"]
         button = next(c for c in view.children if isinstance(c, LimitsButton))
+
+        early = player(5)                                       # the lowest checkpoint is relative to the prog
+        await button.callback(early)
+        assert not early.response.modals and "prog checkpoint first" in early.text
+
+        ctx.db.upsert_player(5, "Ann", prog_index=11, now=NOW)
         press = player(5)
         await button.callback(press)
         modal = press.response.modals[0]
-        assert (modal.per_day.default, modal.per_run.default, modal.drop.default) == ("2", "99", "0")
+        assert (modal.per_day.default, modal.per_run.default) == ("2", "99")
+        assert [o.value for o in modal.min_select.options] == [str(i) for i in range(12)]    # checkpoints up to my prog
+        assert [o.value for o in modal.min_select.options if o.default] == ["11"]            # default: nothing lower
 
-        for per_day, per_run, drop, message in [("x", "4", "0", "whole numbers"), ("0", "4", "0", "between 1 and 8"),
-                                                ("5", "4", "0", "cannot be smaller"), ("2", "4", "19", "between 0")]:
-            modal.per_day._value, modal.per_run._value, modal.drop._value = per_day, per_run, drop
+        for per_day, per_run, message in [("x", "4", "whole numbers"), ("0", "4", "between 1 and 8"),
+                                          ("5", "4", "cannot be smaller")]:
+            modal.per_day._value, modal.per_run._value = per_day, per_run
+            modal.min_select._values = ["11"]
             bad = player(5)
             await modal.on_submit(bad)
             assert message in bad.text and ctx.db.get_limits(run["id"], 5, ctx.cfg)["is_default"]
 
-        modal.per_day._value, modal.per_run._value, modal.drop._value = "3", "6", "2"
+        modal.per_day._value, modal.per_run._value = "3", "6"
+        modal.min_select._values = ["9"]                        # lowest I accept: 2 checkpoints below my prog
         ok = player(5)
         await modal.on_submit(ok)
         lim = ctx.db.get_limits(run["id"], 5, ctx.cfg)
         assert (lim["max_per_day"], lim["max_per_run"], lim["drop_checkpoints"]) == (3, 6, 2)
         assert "up to 3 per day, 6 per run" in ok.response.edits[-1]["content"]
+
+        again = player(5)                                       # reopening preselects what was saved
+        await button.callback(again)
+        assert [o.value for o in again.response.modals[0].min_select.options if o.default] == ["9"]
 
         done = next(c for c in view.children if isinstance(c, DoneButton))
         fin = player(5)

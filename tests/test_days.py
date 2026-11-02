@@ -328,5 +328,8 @@ def test_every_select_and_modal_item_respects_discords_limits(ctx, make_run, clo
                         assert 1 <= len(o.label) <= 100 and len(o.description or "") <= 100 and len(o.value) <= 100
         modal = LimitsModal(view)
         for item in modal.children:
-            assert 1 <= len(item.label) <= 45
+            text = item.text if isinstance(item, discord.ui.Label) else item.label
+            assert 1 <= len(text) <= 45
+        select = modal.min_select
+        assert 1 <= len(select.options) <= 25 and all(1 <= len(o.label) <= 100 for o in select.options)
     run_async(scenario())

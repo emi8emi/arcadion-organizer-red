@@ -251,6 +251,9 @@ class LimitsButton(discord.ui.Button):
     async def callback(self, interaction):
         v = self.view
         if await v.guard(interaction):
+            player = v.ctx.db.get_player(v.user_id)
+            if not player or player["prog_index"] is None:           # the lowest checkpoint is picked relative to it
+                return await v.refresh(interaction, extra="\n⚠ Pick your prog checkpoint first, then set your limits.")
             await interaction.response.send_modal(LimitsModal(v))
 
 
@@ -261,7 +264,7 @@ class DoneButton(discord.ui.Button):
     async def callback(self, interaction):
         v = self.view
         v.stop()
-        done = "\n\n✅ Saved. Run /availability again to change it."
+        done = "\n\nRun /availability again to change it."
         await interaction.response.edit_message(content=v.render(1990 - len(done)) + done, view=None)
 
 
@@ -269,24 +272,40 @@ class LimitsModal(discord.ui.Modal):
     def __init__(self, view):
         super().__init__(title="Limits and playing lower")
         self.owner = view
-        lim = view.ctx.db.get_limits(view.run_id, view.user_id, view.ctx.cfg)
+        db = view.ctx.db
+        lim = db.get_limits(view.run_id, view.user_id, view.ctx.cfg)
+        prog = db.get_player(view.user_id)["prog_index"]
         self.per_day = discord.ui.TextInput(label="Max parties per day", default=str(lim["max_per_day"]),
                                             max_length=2)
         self.per_run = discord.ui.TextInput(label="Max parties for the whole run", default=str(lim["max_per_run"]),
                                             max_length=2)
-        self.drop = discord.ui.TextInput(
-            label="OK with playing lower progs (0 = no)", default=str(lim["drop_checkpoints"]),
-            max_length=2)
-        for item in (self.per_day, self.per_run, self.drop):
+        # The lowest checkpoint the player accepts, from their own prog downwards. It is stored as the number of
+        # checkpoints below their prog (drop_checkpoints), which is what the solver export uses.
+        reachable = [c for c in view.checkpoints if c["idx"] <= prog][-25:]
+        current_min = max(prog - lim["drop_checkpoints"], reachable[0]["idx"])
+        self.min_select = discord.ui.Select(
+            min_values=1, max_values=1,
+            options=[discord.SelectOption(
+                label=(checkpoint_label(view.checkpoints, c["idx"]) + (" (my prog: no lower)" if c["idx"] == prog else ""))[:100],
+                value=str(c["idx"]), default=c["idx"] == current_min) for c in reachable])
+        for item in (self.per_day, self.per_run,
+                     discord.ui.Label(text="Lowest checkpoint you accept", component=self.min_select,
+                                      description="Pick your own prog if you never want to play lower.")):
             self.add_item(item)
 
     async def on_submit(self, interaction):
         v = self.owner
         try:
-            per_day, per_run, drop = (int(x.value) for x in (self.per_day, self.per_run, self.drop))
+            per_day, per_run = (int(x.value) for x in (self.per_day, self.per_run))
         except ValueError:
             await interaction.response.send_message("Those need to be whole numbers.", ephemeral=True)
             return
+        player = v.ctx.db.get_player(v.user_id)
+        prog = player["prog_index"] if player else None
+        if prog is None:
+            await interaction.response.send_message("Pick your prog checkpoint first, then set your limits.", ephemeral=True)
+            return
+        drop = max(0, prog - int(self.min_select.values[0]))      # checkpoints below their prog they accept
         err = validate_limits(per_day, per_run, drop, len(v.checkpoints))
         if err:
             await interaction.response.send_message(err, ephemeral=True)
