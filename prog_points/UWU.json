@@ -1,0 +1,381 @@
+{
+  "version": 1,
+  "encounter": "UWU",
+  "encounter_id": 1074,
+  "encounter_name": "The Ultima Weapon",
+  "points": [
+    {
+      "phase": "Garuda",
+      "name": "Fresh",
+      "mode": "all",
+      "conditions": [
+        {
+          "type": "cast",
+          "ability": "Slipstream",
+          "aid": 11091,
+          "source": null,
+          "kind": "begincast",
+          "nth": 1,
+          "phase": 1
+        }
+      ],
+      "tags": [],
+      "idx": 0
+    },
+    {
+      "phase": "Garuda",
+      "name": "Cleanse",
+      "mode": "all",
+      "conditions": [
+        {
+          "type": "cast",
+          "ability": "Friction",
+          "aid": 11080,
+          "source": null,
+          "kind": "begincast",
+          "nth": 1,
+          "phase": 1
+        },
+        {
+          "type": "cast",
+          "ability": "Friction",
+          "aid": 11080,
+          "source": null,
+          "kind": "cast",
+          "nth": 2,
+          "phase": 1
+        }
+      ],
+      "tags": [],
+      "idx": 1
+    },
+    {
+      "phase": "Garuda",
+      "name": "Twins bait",
+      "mode": "all",
+      "conditions": [
+        {
+          "type": "cast",
+          "ability": "Eye of the Storm",
+          "aid": 11090,
+          "source": null,
+          "kind": "begincast",
+          "nth": 1,
+          "phase": 1
+        }
+      ],
+      "tags": [],
+      "idx": 2
+    },
+    {
+      "phase": "Garuda",
+      "name": "Meso cleanse",
+      "mode": "all",
+      "conditions": [
+        {
+          "type": "cast",
+          "ability": "Eye of the Storm",
+          "aid": 11090,
+          "source": null,
+          "kind": "begincast",
+          "nth": 2,
+          "phase": 1
+        }
+      ],
+      "tags": [],
+      "idx": 3
+    },
+    {
+      "phase": "Ifrit",
+      "name": "Fresh",
+      "mode": "all",
+      "conditions": [
+        {
+          "type": "cast",
+          "ability": "Hellfire",
+          "aid": 11102,
+          "source": null,
+          "kind": "begincast",
+          "nth": 1,
+          "phase": 2
+        }
+      ],
+      "tags": [],
+      "idx": 4
+    },
+    {
+      "phase": "Ifrit",
+      "name": "Nails",
+      "mode": "all",
+      "conditions": [
+        {
+          "type": "cast",
+          "ability": "イフリート：炎獄の楔召喚",
+          "aid": 461,
+          "source": null,
+          "kind": "cast",
+          "nth": 1,
+          "phase": 2
+        }
+      ],
+      "tags": [
+        "cleanup"
+      ],
+      "idx": 5
+    },
+    {
+      "phase": "Ifrit",
+      "name": "Eruption baits",
+      "mode": "all",
+      "conditions": [
+        {
+          "type": "cast",
+          "ability": "Eruption",
+          "aid": 11098,
+          "source": null,
+          "kind": "begincast",
+          "nth": 10,
+          "phase": 2
+        }
+      ],
+      "tags": [],
+      "idx": 6
+    },
+    {
+      "phase": "Ifrit",
+      "name": "Enrage",
+      "mode": "all",
+      "conditions": [
+        {
+          "type": "cast",
+          "ability": "Incinerate",
+          "aid": 11094,
+          "source": null,
+          "kind": "cast",
+          "nth": 4,
+          "phase": 2
+        }
+      ],
+      "tags": [],
+      "idx": 7
+    },
+    {
+      "phase": "Titan",
+      "name": "Fresh",
+      "mode": "all",
+      "conditions": [
+        {
+          "type": "cast",
+          "ability": "Earthen Fury",
+          "aid": 11152,
+          "source": null,
+          "kind": "begincast",
+          "nth": 1,
+          "phase": 3
+        }
+      ],
+      "tags": [],
+      "idx": 8
+    },
+    {
+      "phase": "Titan",
+      "name": "Gaols",
+      "mode": "all",
+      "conditions": [
+        {
+          "type": "cast",
+          "ability": "Rock Throw",
+          "aid": 11115,
+          "source": null,
+          "kind": "cast",
+          "nth": 1,
+          "phase": 3
+        }
+      ],
+      "tags": [
+        "cleanup"
+      ],
+      "idx": 9
+    },
+    {
+      "phase": "Titan",
+      "name": "Healer gaol",
+      "mode": "all",
+      "conditions": [
+        {
+          "type": "cast",
+          "ability": "Rock Throw",
+          "aid": 11115,
+          "source": null,
+          "kind": "cast",
+          "nth": 2,
+          "phase": 3
+        }
+      ],
+      "tags": [],
+      "idx": 10
+    },
+    {
+      "phase": "Titan",
+      "name": "Mario kart",
+      "mode": "all",
+      "conditions": [
+        {
+          "type": "cast",
+          "ability": "Tumult",
+          "aid": 11288,
+          "source": null,
+          "kind": "cast",
+          "nth": 9,
+          "phase": 3
+        }
+      ],
+      "tags": [],
+      "idx": 11
+    },
+    {
+      "phase": "Titan",
+      "name": "Enrage",
+      "mode": "all",
+      "conditions": [
+        {
+          "type": "cast",
+          "ability": "unknown_2b68",
+          "aid": 11112,
+          "source": null,
+          "kind": "cast",
+          "nth": 2,
+          "phase": 3
+        }
+      ],
+      "tags": [],
+      "idx": 12
+    },
+    {
+      "phase": "Magitek Bits",
+      "name": "Intermission",
+      "mode": "all",
+      "conditions": [
+        {
+          "type": "cast",
+          "ability": "Self-Detonate",
+          "aid": 11122,
+          "source": null,
+          "kind": "begincast",
+          "nth": 6,
+          "phase": null
+        }
+      ],
+      "tags": [],
+      "idx": 13
+    },
+    {
+      "phase": "The Ultima Weapon",
+      "name": "Fresh",
+      "mode": "all",
+      "conditions": [
+        {
+          "type": "cast",
+          "ability": "Tank Purge",
+          "aid": 11143,
+          "source": null,
+          "kind": "begincast",
+          "nth": 1,
+          "phase": 5
+        }
+      ],
+      "tags": [],
+      "idx": 14
+    },
+    {
+      "phase": "The Ultima Weapon",
+      "name": "Predation",
+      "mode": "all",
+      "conditions": [
+        {
+          "type": "cast",
+          "ability": "Ultimate Predation",
+          "aid": 11126,
+          "source": null,
+          "kind": "cast",
+          "nth": 1,
+          "phase": 5
+        }
+      ],
+      "tags": [],
+      "idx": 15
+    },
+    {
+      "phase": "The Ultima Weapon",
+      "name": "Annihilation",
+      "mode": "all",
+      "conditions": [
+        {
+          "type": "cast",
+          "ability": "Ultimate Annihilation",
+          "aid": 11596,
+          "source": null,
+          "kind": "cast",
+          "nth": 1,
+          "phase": 5
+        }
+      ],
+      "tags": [],
+      "idx": 16
+    },
+    {
+      "phase": "The Ultima Weapon",
+      "name": "Suppression",
+      "mode": "all",
+      "conditions": [
+        {
+          "type": "cast",
+          "ability": "Ultimate Suppression",
+          "aid": 11597,
+          "source": null,
+          "kind": "begincast",
+          "nth": 1,
+          "phase": 5
+        }
+      ],
+      "tags": [],
+      "idx": 17
+    },
+    {
+      "phase": "The Ultima Weapon",
+      "name": "Aetheric Boom",
+      "mode": "all",
+      "conditions": [
+        {
+          "type": "cast",
+          "ability": "Aetheric Boom",
+          "aid": 11144,
+          "source": null,
+          "kind": "begincast",
+          "nth": 1,
+          "phase": 5
+        }
+      ],
+      "tags": [],
+      "idx": 18
+    },
+    {
+      "phase": "The Ultima Weapon",
+      "name": "Enrage",
+      "mode": "all",
+      "conditions": [
+        {
+          "type": "cast",
+          "ability": "unknown_2b92",
+          "aid": 11154,
+          "source": null,
+          "kind": "cast",
+          "nth": 1,
+          "phase": 5
+        }
+      ],
+      "tags": [],
+      "idx": 19
+    }
+  ]
+}

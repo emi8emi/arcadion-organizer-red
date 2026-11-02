@@ -12,6 +12,8 @@ from zoneinfo import available_timezones
 import discord
 
 from . import characters as ch
+from . import progscore
+from .fflogs import FFLogsError
 from . import heatmap
 from .config import ROOT
 from .db import DraftConflict, DuplicateRun, parse_iso
@@ -689,6 +691,124 @@ async def debug_complete(ctx, interaction, name=None, day=None):
         lines.append(f"{already} slot(s) had already ended and were left alone.")
     lines.append("The rating button appears in each slot's thread within a minute (or use /rate).")
     await say(interaction, "\n".join(lines)[:1990])
+
+
+async def _debug_fight(ctx, interaction, content):
+    fight = _fight_for(ctx, content)
+    if fight is None:
+        known = ", ".join(f["short_name"] or f["name"] for f in ctx.db.fights())
+        await say(interaction, f"Say which fight (content). Known: {known}.")
+    return fight
+
+
+def _prog_text(cps, idx):
+    from .services import checkpoint_label
+    return f"**{checkpoint_label(cps, idx)}** (#{idx})"
+
+
+async def debug_setprog(ctx, interaction, member, checkpoint, content=None):
+    """Testing aid: set a player's current prog point by checkpoint index."""
+    if not await require_organizer(ctx, interaction):
+        return
+    fight = await _debug_fight(ctx, interaction, content)
+    if fight is None:
+        return
+    cps = ctx.db.checkpoints(fight["id"])
+    if checkpoint not in {c["idx"] for c in cps}:
+        return await say(interaction, f"Checkpoint must be a number from 0 to {max(c['idx'] for c in cps)}.")
+    ctx.db.upsert_player(member.id, member.display_name, prog_index=checkpoint, now=ctx.now())
+    await say(interaction, f"{member.display_name}'s prog is now {_prog_text(cps, checkpoint)}.")
+
+
+async def debug_sync_checkpoints(ctx, interaction, confirm=False, content=None):
+    """Testing aid: make the fight's checkpoints match its prog point file (needed once, before scoring)."""
+    if not await require_organizer(ctx, interaction):
+        return
+    fight = await _debug_fight(ctx, interaction, content)
+    if fight is None:
+        return
+    try:
+        doc = progscore.load_doc(ctx.cfg, fight)
+    except progscore.ProgPointError as e:
+        return await say(interaction, str(e))
+    if progscore.checkpoints_match(ctx.db, fight["id"], doc):
+        return await say(interaction, "The checkpoints already match the prog point file.")
+    affected = progscore.players_with_prog(ctx.db)
+    if not confirm:
+        return await say(interaction, (
+            f"The checkpoints differ from the prog point file ({len(doc['points'])} points vs "
+            f"{len(ctx.db.checkpoints(fight['id']))} now). Syncing replaces them and clears the prog of "
+            f"{affected} player(s), since the numbers change meaning. Run again with confirm:True to do it."))
+    progscore.sync_checkpoints(ctx.db, fight["id"], doc)
+    await say(interaction, f"Checkpoints replaced with the {len(doc['points'])} points of the prog point file; "
+                           f"cleared the prog of {affected} player(s).")
+
+
+def _score_summary(doc, state, mode, cps, name):
+    chosen = progscore.effective_highest(doc, state, mode)
+    other_mode = "consistent" if mode == "normal" else "normal"
+    other = progscore.effective_highest(doc, state, other_mode)
+
+    def show(h):
+        return f"{h['phase']} {h['name']} (#{h['idx']})" if h else "nothing reached"
+
+    lines = [f"**{name}**: scored {len(state['pulls'])} pull(s)."]
+    lines.append(f"Normal (cleanup tag ignored): {show(progscore.effective_highest(doc, state, 'normal'))}")
+    lines.append(f"Consistent (cleanup points must pass the check): {show(progscore.effective_highest(doc, state, 'consistent'))}")
+    cl = progscore.cleanup_lines(state)
+    if cl:
+        lines += ["Cleanup consistency:", *cl]
+    return chosen, "\n".join(lines)
+
+
+async def debug_score(ctx, interaction, member, mode="normal", count=10, character=None, reset=False, content=None):
+    """Testing aid: score a player's FFLogs history and set their prog to the highest point found.
+
+    mode 'normal' treats cleanup-tagged points like any other; 'consistent' skips cleanup points whose
+    consistency check failed."""
+    if not await require_organizer(ctx, interaction):
+        return
+    if ctx.fflogs is None:
+        return await say(interaction, "FFLogs is not configured (fflogs_client_id / fflogs_client_secret).")
+    if mode not in progscore.MODES:
+        return await say(interaction, f"Mode must be one of: {', '.join(progscore.MODES)}.")
+    if not 1 <= count <= 30:
+        return await say(interaction, "Count is how many recent reports to read: 1 to 30.")
+    fight = await _debug_fight(ctx, interaction, content)
+    if fight is None:
+        return
+    try:
+        doc = progscore.load_doc(ctx.cfg, fight)
+    except progscore.ProgPointError as e:
+        return await say(interaction, str(e))
+    if not progscore.checkpoints_match(ctx.db, fight["id"], doc):
+        return await say(interaction, "This fight's checkpoints do not match its prog point file, so the scored "
+                                      "numbers would point at the wrong checkpoints. Run /debug sync_checkpoints first.")
+    chars = ch.list_characters(ctx.db, member.id)
+    if character:
+        chars = [c for c in chars if character.lower() in (c["name"].lower(), ch.label(c).lower())]
+    if not chars:
+        return await say(interaction, f"{member.display_name} has no matching verified character (/character add).")
+    if len(chars) > 1:
+        return await say(interaction, "More than one character: pick one with `character` ("
+                                      + ", ".join(c["name"] for c in chars) + ").")
+    char = chars[0]
+    await interaction.response.defer(ephemeral=True)          # reading logs can take a while
+    try:
+        state, restarted = await progscore.score_character(ctx, char, doc, count=count, reset=reset)
+    except FFLogsError as e:
+        return await say(interaction, f"FFLogs problem: {e} Progress so far is kept; run it again to continue.")
+    except progscore.ProgPointError as e:
+        return await say(interaction, f"The prog point file is not usable: {e}")
+    chosen, text = _score_summary(doc, state, mode, ctx.db.checkpoints(fight["id"]), ch.label(char))
+    if restarted:
+        text = f"Started over: {restarted}\n" + text
+    if chosen is None:
+        text += "\nNo point reached, so the prog was left as it was."
+    else:
+        ctx.db.upsert_player(member.id, member.display_name, prog_index=chosen["idx"], now=ctx.now())
+        text += f"\nSet {member.display_name}'s prog ({mode}) to **{chosen['phase']} {chosen['name']}** (#{chosen['idx']})."
+    await say(interaction, text[:1990])
 
 
 # ---------------------------------------------------------------- /party import

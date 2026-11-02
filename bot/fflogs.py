@@ -7,17 +7,17 @@ import asyncio
 import time
 from dataclasses import dataclass
 
+from .fflogs_api import FFLogsError      # one class for both modules, so the scorer's errors are caught too
+
 TOKEN_URL = "https://www.fflogs.com/oauth/token"
 API_URL = "https://www.fflogs.com/api/v2/client"
-TIMEOUT_S = 10
+TIMEOUT_S = 60            # prog scoring pulls multi-MB event pages; identity lookups are tiny
 
 _FIELDS = "id canonicalID name lodestoneID server { name }"
 BY_LODESTONE = "query($i: Int!) { characterData { character(lodestoneID: $i) { %s } } }" % _FIELDS
 BY_ID = "query($i: Int!) { characterData { character(id: $i) { %s } } }" % _FIELDS
 
 
-class FFLogsError(Exception):
-    """FFLogs could not be read (down, bad credentials, schema changed)."""
 
 
 @dataclass(frozen=True)
@@ -49,7 +49,7 @@ class FFLogsClient:
                 raise FFLogsError(f"FFLogs answered with status {resp.status}.")
             return await resp.json()
 
-    async def _query(self, query, variables):
+    async def query(self, query, variables):
         import aiohttp
         try:
             timeout = aiohttp.ClientTimeout(total=TIMEOUT_S)
@@ -61,10 +61,13 @@ class FFLogsClient:
                 body = await self._post(session, API_URL, json={"query": query, "variables": variables},
                                         headers={"Authorization": f"Bearer {self._token}"})
         except (aiohttp.ClientError, asyncio.TimeoutError, KeyError) as e:
-            raise FFLogsError("I could not reach FFLogs right now.") from e
+            raise FFLogsError(f"I could not reach FFLogs right now ({type(e).__name__}).") from e
         if body.get("errors"):
-            raise FFLogsError("FFLogs rejected the request.")
+            raise FFLogsError("FFLogs rejected the request: "
+                              + "; ".join(str(e.get("message", "?")) for e in body["errors"])[:300])
         return body.get("data")
+
+    _query = query                                  # old name, still used by identity()
 
     async def identity(self, lodestone_id=None, fflogs_id=None):
         """LogsIdentity of the character's most recent name/server, or None if FFLogs does not know it."""

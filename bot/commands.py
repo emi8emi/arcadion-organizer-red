@@ -171,6 +171,33 @@ class DebugGroup(app_commands.Group):
                        day: Optional[str] = None):
         await handlers.debug_complete(self.ctx, interaction, name, day)
 
+    @app_commands.command(name="setprog", description="Testing: set a player's current prog point")
+    @app_commands.describe(member="Whose prog", checkpoint="Checkpoint number (see /availability for the list)",
+                           content="The fight (optional while there is only one)")
+    async def setprog(self, interaction: discord.Interaction, member: discord.Member, checkpoint: int,
+                      content: Optional[str] = None):
+        await handlers.debug_setprog(self.ctx, interaction, member, checkpoint, content)
+
+    @app_commands.command(name="score", description="Testing: score a player's FFLogs and set their prog to the highest found")
+    @app_commands.describe(member="Whose logs", mode="normal ignores the cleanup tag; consistent requires cleanup points to pass the check",
+                           count="How many recent reports to read (default 10)",
+                           character="Which character, if they have several",
+                           reset="Throw away stored scores and start over",
+                           content="The fight (optional while there is only one)")
+    @app_commands.choices(mode=[app_commands.Choice(name="Normal (ignore cleanup tag)", value="normal"),
+                                app_commands.Choice(name="Consistent (check cleanup tag)", value="consistent")])
+    async def score(self, interaction: discord.Interaction, member: discord.Member,
+                    mode: app_commands.Choice[str], count: int = 10, character: Optional[str] = None,
+                    reset: bool = False, content: Optional[str] = None):
+        await handlers.debug_score(self.ctx, interaction, member, mode.value, count, character, reset, content)
+
+    @app_commands.command(name="sync_checkpoints", description="Testing: make the fight's checkpoints match its prog point file")
+    @app_commands.describe(confirm="Replace the checkpoints and clear every player's prog",
+                           content="The fight (optional while there is only one)")
+    async def sync_checkpoints(self, interaction: discord.Interaction, confirm: bool = False,
+                               content: Optional[str] = None):
+        await handlers.debug_sync_checkpoints(self.ctx, interaction, confirm, content)
+
 
 class SettingsGroup(app_commands.Group):
     def __init__(self, ctx):
