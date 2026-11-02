@@ -34,12 +34,13 @@ UP_TO_TITAN = list(range(9))
 def test_bundled_prog_points_are_valid(ctx):
     doc = doc_of(ctx)
     assert [p["idx"] for p in doc["points"]] == list(range(len(doc["points"])))
+    assert doc["points"][-1]["name"] == "Clear" and doc["points"][-1]["idx"] == 20
 
 
 def test_normal_mode_ignores_the_cleanup_tag(ctx):
     doc = doc_of(ctx)
     state = make_state(doc, [UP_TO_GAOLS] + [UP_TO_TITAN] * 4)         # Gaols reached once in five pulls
-    assert progscore.failed_cleanup_points(state) == {9}
+    assert progscore.failed_cleanup_points(doc, state) == {9}
     assert progscore.effective_highest(doc, state, "normal")["idx"] == 9
 
 
@@ -122,7 +123,7 @@ def test_setprog_sets_and_validates(ctx):
     assert ctx.db.get_player(7)["prog_index"] == 12 and "#12" in it.text
     it = organizer()
     run_async(handlers.debug_setprog(ctx, it, member(), 99))
-    assert "from 0 to 19" in it.text and ctx.db.get_player(7)["prog_index"] == 12
+    assert "from 0 to 20" in it.text and ctx.db.get_player(7)["prog_index"] == 12
 
 
 def test_sync_needs_confirmation(ctx):
@@ -132,7 +133,19 @@ def test_sync_needs_confirmation(ctx):
     assert "confirm" in it.text and ctx.db.get_player(7)["prog_index"] == 3
     it = organizer()
     run_async(handlers.debug_sync_checkpoints(ctx, it, confirm=True))
-    assert ctx.db.get_player(7)["prog_index"] is None and len(ctx.db.checkpoints(1)) == 20
+    assert ctx.db.get_player(7)["prog_index"] is None and len(ctx.db.checkpoints(1)) == 21
+
+
+class FakeLogs:
+    """Answers the recentReports query: one report per entry of `ages_h` (hours before NOW), newest first."""
+    def __init__(self, ages_h=(1,)):
+        from datetime import timedelta
+        self.reports = [{"code": f"CODE{i}", "startTime": (NOW - timedelta(hours=h)).timestamp() * 1000}
+                        for i, h in enumerate(ages_h)]
+
+    async def query(self, graphql, variables):
+        return {"characterData": {"character": {"recentReports": {"data": self.reports[:variables["limit"]],
+                                                                  "has_more_pages": False}}}}
 
 
 def stub_scorer(monkeypatch, reached_lists):
@@ -144,7 +157,7 @@ def stub_scorer(monkeypatch, reached_lists):
 
 
 def test_score_refuses_until_checkpoints_match(ctx, monkeypatch):
-    ctx.fflogs = object()
+    ctx.fflogs = FakeLogs()
     add_char(ctx)
     it = organizer()
     run_async(handlers.debug_score(ctx, it, member()))
@@ -153,7 +166,7 @@ def test_score_refuses_until_checkpoints_match(ctx, monkeypatch):
 
 def test_score_sets_prog_in_each_mode(ctx, monkeypatch):
     synced(ctx)
-    ctx.fflogs = SimpleNamespace(query=None)
+    ctx.fflogs = FakeLogs()
     add_char(ctx)
     stub_scorer(monkeypatch, [UP_TO_GAOLS] + [UP_TO_TITAN] * 4)
     it = organizer()
@@ -161,24 +174,96 @@ def test_score_sets_prog_in_each_mode(ctx, monkeypatch):
     assert ctx.db.get_player(7)["prog_index"] == 9 and "Gaols" in it.text
     it = organizer()
     run_async(handlers.debug_score(ctx, it, member(), mode="consistent"))
-    assert ctx.db.get_player(7)["prog_index"] == 8
+    assert ctx.db.get_player(7)["prog_index"] == 9                      # never goes down
     assert "❌" in it.text                                             # the failed cleanup point is shown
+
+
+def test_consistent_mode_alone_sets_the_lower_prog(ctx, monkeypatch):
+    synced(ctx)
+    ctx.fflogs = FakeLogs()
+    add_char(ctx)
+    stub_scorer(monkeypatch, [UP_TO_GAOLS] + [UP_TO_TITAN] * 4)
+    run_async(handlers.debug_score(ctx, organizer(), member(), mode="consistent"))
+    assert ctx.db.get_player(7)["prog_index"] == 8
+
+
+def test_confirmed_prog_is_kept_and_latest_is_tracked(ctx, monkeypatch):
+    synced(ctx)
+    ctx.fflogs = FakeLogs()
+    add_char(ctx)
+    stub_scorer(monkeypatch, [UP_TO_GAOLS] * 5)
+    run_async(handlers.debug_score(ctx, organizer(), member()))
+    stub_scorer(monkeypatch, [list(range(4))])                          # a later, worse run
+    it = organizer()
+    run_async(handlers.debug_score(ctx, it, member(), reset=True))
+    row = progscore.get_scores(ctx.db, 1, 1074)
+    assert (row["confirmed_idx"], row["latest_idx"]) == (9, 3)
+    assert row["confirmed_utc"] and row["latest_utc"]
+    assert ctx.db.get_player(7)["prog_index"] == 9 and "stays at" in it.text
+
+
+def test_manual_prog_above_the_scored_one_is_not_lowered(ctx, monkeypatch):
+    synced(ctx)
+    ctx.fflogs = FakeLogs()
+    add_char(ctx)
+    ctx.db.upsert_player(7, "Ann", prog_index=15, now=NOW)
+    stub_scorer(monkeypatch, [UP_TO_TITAN])
+    run_async(handlers.debug_score(ctx, organizer(), member()))
+    assert ctx.db.get_player(7)["prog_index"] == 15
+
+
+def test_default_fetch_reads_only_the_last_24_hours(ctx):
+    ctx.fflogs = FakeLogs([1, 23, 30, 50])
+    char = {"fflogs_id": 900, "name": "Ann Tank", "world": "Exodus"}
+    assert run_async(progscore.recent_codes(ctx, char, 10, 24)) == ["CODE0", "CODE1"]
+    assert len(run_async(progscore.recent_codes(ctx, char, 10, 0))) == 4        # no time limit
+    assert run_async(progscore.recent_codes(ctx, char, 3, 0)) == ["CODE0", "CODE1", "CODE2"]
+
+
+def test_no_reports_in_the_window_skips_the_scorer(ctx, monkeypatch):
+    synced(ctx)
+    ctx.fflogs = FakeLogs([40])
+    add_char(ctx)
+
+    async def never(*a, **k):
+        raise AssertionError("scorer should not run")
+    monkeypatch.setattr(prog_scorer, "score_player_async", never)
+    it = organizer()
+    run_async(handlers.debug_score(ctx, it, member()))
+    assert "nothing in this window" in it.text
+
+
+def test_cleanup_point_counts_when_the_next_point_was_reached(ctx):
+    doc = doc_of(ctx)
+    skipping = [i for i in range(11) if i != 9]                         # Healer gaol (10) reached, Gaols (9) itself not seen
+    state = make_state(doc, [skipping] * 5)
+    assert progscore.failed_cleanup_points(doc, state) == set()
+    assert 5 in progscore.adjusted_reached(doc, [0, 1, 2, 3, 4, 6])          # Ifrit: Eruption baits implies Nails
+
+
+def test_the_clear_point_checks_for_a_kill(ctx):
+    doc = doc_of(ctx)
+    clear = doc["points"][-1]
+    assert [c["type"] for c in clear["conditions"]] == ["kill"]
+    assert progpoints.point_time(clear, {"kill": True, "duration": 812.5}) == 812.5
+    assert progpoints.point_time(clear, {"kill": False, "duration": 700}) is None
+    assert progscore.with_clear(doc) is doc                              # added once only
 
 
 def test_score_with_no_pulls_leaves_prog_alone(ctx, monkeypatch):
     synced(ctx)
-    ctx.fflogs = SimpleNamespace(query=None)
+    ctx.fflogs = FakeLogs()
     add_char(ctx)
     ctx.db.upsert_player(7, "Ann", prog_index=4, now=NOW)
     stub_scorer(monkeypatch, [])
     it = organizer()
     run_async(handlers.debug_score(ctx, it, member()))
-    assert ctx.db.get_player(7)["prog_index"] == 4 and "left as it was" in it.text
+    assert ctx.db.get_player(7)["prog_index"] == 4 and "stays at" in it.text
 
 
 def test_score_reports_fflogs_errors(ctx, monkeypatch):
     synced(ctx)
-    ctx.fflogs = SimpleNamespace(query=None)
+    ctx.fflogs = FakeLogs()
     add_char(ctx)
 
     async def boom(*a, **k):
@@ -191,7 +276,7 @@ def test_score_reports_fflogs_errors(ctx, monkeypatch):
 
 def test_score_restarts_when_stored_state_is_stale(ctx, monkeypatch):
     synced(ctx)
-    ctx.fflogs = SimpleNamespace(query=None)
+    ctx.fflogs = FakeLogs()
     add_char(ctx)
     doc = doc_of(ctx)
     old = make_state(doc, [UP_TO_TITAN])
@@ -209,7 +294,7 @@ def test_score_needs_a_character_and_fflogs(ctx):
     it = organizer()
     run_async(handlers.debug_score(ctx, it, member()))
     assert "not configured" in it.text
-    ctx.fflogs = SimpleNamespace(query=None)
+    ctx.fflogs = FakeLogs()
     it = organizer()
     run_async(handlers.debug_score(ctx, it, member(99)))
     assert "no matching verified character" in it.text

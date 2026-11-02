@@ -744,36 +744,40 @@ async def debug_sync_checkpoints(ctx, interaction, confirm=False, content=None):
                            f"cleared the prog of {affected} player(s).")
 
 
-def _score_summary(doc, state, mode, cps, name):
-    chosen = progscore.effective_highest(doc, state, mode)
-    other_mode = "consistent" if mode == "normal" else "normal"
-    other = progscore.effective_highest(doc, state, other_mode)
-
+def _score_summary(doc, state, name):
     def show(h):
         return f"{h['phase']} {h['name']} (#{h['idx']})" if h else "nothing reached"
 
-    lines = [f"**{name}**: scored {len(state['pulls'])} pull(s)."]
-    lines.append(f"Normal (cleanup tag ignored): {show(progscore.effective_highest(doc, state, 'normal'))}")
-    lines.append(f"Consistent (cleanup points must pass the check): {show(progscore.effective_highest(doc, state, 'consistent'))}")
-    cl = progscore.cleanup_lines(state)
+    lines = [f"**{name}**: {len(state['pulls'])} pull(s) stored.",
+             f"Normal (cleanup tag ignored): {show(progscore.effective_highest(doc, state, 'normal'))}",
+             f"Consistent (cleanup points must pass the check): {show(progscore.effective_highest(doc, state, 'consistent'))}"]
+    cl = progscore.cleanup_lines(doc, state)
     if cl:
         lines += ["Cleanup consistency:", *cl]
-    return chosen, "\n".join(lines)
+    return "\n".join(lines)
 
 
-async def debug_score(ctx, interaction, member, mode="normal", count=10, character=None, reset=False, content=None):
-    """Testing aid: score a player's FFLogs history and set their prog to the highest point found.
+def _day(iso_text):
+    return iso_text[:16].replace("T", " ") + " UTC" if iso_text else "?"
+
+
+async def debug_score(ctx, interaction, member, mode="normal", count=10, character=None, reset=False, content=None,
+                      hours=None):
+    """Testing aid: score a player's recent FFLogs reports and raise their prog to the highest point found.
 
     mode 'normal' treats cleanup-tagged points like any other; 'consistent' skips cleanup points whose
-    consistency check failed."""
+    consistency check failed. hours = how far back to read reports (default cfg prog_fetch_hours = 24;
+    0 = no limit). The prog never goes down: the highest confirmed point is stored and only raised."""
     if not await require_organizer(ctx, interaction):
         return
     if ctx.fflogs is None:
         return await say(interaction, "FFLogs is not configured (fflogs_client_id / fflogs_client_secret).")
     if mode not in progscore.MODES:
         return await say(interaction, f"Mode must be one of: {', '.join(progscore.MODES)}.")
-    if not 1 <= count <= 30:
-        return await say(interaction, "Count is how many recent reports to read: 1 to 30.")
+    hours = ctx.cfg.get("prog_fetch_hours", 24) if hours is None else hours
+    if not 1 <= count <= 30 or not 0 <= hours <= 24 * 365:
+        return await say(interaction, "Count is how many recent reports to read: 1 to 30. Hours is how far back, "
+                                      "0 for no limit.")
     fight = await _debug_fight(ctx, interaction, content)
     if fight is None:
         return
@@ -795,19 +799,31 @@ async def debug_score(ctx, interaction, member, mode="normal", count=10, charact
     char = chars[0]
     await interaction.response.defer(ephemeral=True)          # reading logs can take a while
     try:
-        state, restarted = await progscore.score_character(ctx, char, doc, count=count, reset=reset)
+        state, restarted = await progscore.score_character(ctx, char, doc, count=count, hours=hours, reset=reset)
     except FFLogsError as e:
         return await say(interaction, f"FFLogs problem: {e} Progress so far is kept; run it again to continue.")
     except progscore.ProgPointError as e:
         return await say(interaction, f"The prog point file is not usable: {e}")
-    chosen, text = _score_summary(doc, state, mode, ctx.db.checkpoints(fight["id"]), ch.label(char))
+    text = _score_summary(doc, state, ch.label(char))
+    text += f"\nRead reports from the last {hours} hour(s)." if hours else "\nRead reports with no time limit."
     if restarted:
         text = f"Started over: {restarted}\n" + text
-    if chosen is None:
-        text += "\nNo point reached, so the prog was left as it was."
+    chosen = progscore.effective_highest(doc, state, mode)
+    row, raised = progscore.record_result(ctx.db, char["id"], doc["encounter_id"], chosen, mode, state, ctx.now())
+    cps = {c["idx"]: c for c in ctx.db.checkpoints(fight["id"])}
+
+    def label(idx):
+        return f"{cps[idx]['phase']} {cps[idx]['name']} (#{idx})"
+    text += (f"\nLatest highest ({mode}): {label(chosen['idx'])}" if chosen else f"\nLatest highest ({mode}): nothing in this window")
+    if row["confirmed_idx"] is not None:
+        text += f"\nHighest confirmed: {label(row['confirmed_idx'])}, {row['confirmed_mode']}, {_day(row['confirmed_utc'])}" \
+                + (" (new)" if raised else "")
+    current = ctx.db.get_player(member.id)["prog_index"] if ctx.db.get_player(member.id) else None
+    if row["confirmed_idx"] is not None and (current is None or row["confirmed_idx"] > current):
+        ctx.db.upsert_player(member.id, member.display_name, prog_index=row["confirmed_idx"], now=ctx.now())
+        text += f"\nSet {member.display_name}'s prog to **{label(row['confirmed_idx'])}**."
     else:
-        ctx.db.upsert_player(member.id, member.display_name, prog_index=chosen["idx"], now=ctx.now())
-        text += f"\nSet {member.display_name}'s prog ({mode}) to **{chosen['phase']} {chosen['name']}** (#{chosen['idx']})."
+        text += f"\n{member.display_name}'s prog stays at " + (label(current) if current is not None else "unset") + "."
     await say(interaction, text[:1990])
 
 

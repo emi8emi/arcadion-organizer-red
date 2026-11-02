@@ -6,23 +6,44 @@ stdlib-only package that is copied here unchanged.
 Modes for points tagged `cleanup` (see `effective_highest`):
   normal       the tag is ignored: the highest point reached in any pull counts.
   consistent   a cleanup point only counts when the tag check passed for it (reached in at least `min` of the
-               most recent `of` pulls, 3 of 5 unless the prog point file says otherwise).
+               most recent `of` pulls, 3 of 5 unless the prog point file says otherwise). A pull that went on to
+               the next non-cleanup point counts as having reached the cleanup point too.
 """
 import json
+from datetime import datetime, timedelta, timezone
 
 from . import prog_scorer, progpoints
 from .config import ROOT
 from .db import iso
+from .fflogs_api import FFLogsError
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS prog_scores (
-    character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
-    encounter    INTEGER NOT NULL,
-    state        TEXT NOT NULL,
-    updated_utc  TEXT NOT NULL,
+    character_id   INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    encounter      INTEGER NOT NULL,
+    state          TEXT NOT NULL,
+    updated_utc    TEXT NOT NULL,
+    confirmed_idx  INTEGER,          -- highest point ever confirmed; never goes down
+    confirmed_mode TEXT,             -- the scoring mode that confirmed it
+    confirmed_utc  TEXT,             -- when that pull happened
+    latest_idx     INTEGER,          -- highest point of the latest scoring run (can be below confirmed)
+    latest_mode    TEXT,
+    latest_utc     TEXT,             -- when the latest run happened
     PRIMARY KEY (character_id, encounter)
 );
 """
+_NEW_COLUMNS = ("confirmed_idx INTEGER", "confirmed_mode TEXT", "confirmed_utc TEXT",
+                "latest_idx INTEGER", "latest_mode TEXT", "latest_utc TEXT")
+
+
+def ensure_schema(conn):
+    conn.executescript(SCHEMA)
+    have = {r[1] for r in conn.execute("PRAGMA table_info(prog_scores)")}
+    for col in _NEW_COLUMNS:                      # tables made by the first version lack these
+        if col.split()[0] not in have:
+            conn.execute(f"ALTER TABLE prog_scores ADD COLUMN {col}")
+    conn.commit()
+
 
 MODES = ("normal", "consistent")
 CLEANUP_TAG = "cleanup"
@@ -43,7 +64,18 @@ def load_doc(cfg, fight):
     path = points_path(cfg, fight)
     if not path.exists():
         raise ProgPointError(f"There is no prog point file for {fight['name']} (expected {path.name}).")
-    return progpoints.load_points(path)
+    return with_clear(progpoints.load_points(path))
+
+
+def with_clear(doc):
+    """Every fight ends with a 'Clear' point that only checks for a kill. Added unless the file has one."""
+    pts = doc["points"]
+    if not pts or any(p["name"].lower() == "clear" for p in pts):
+        return doc
+    last = pts[-1]
+    return progpoints.load_points({**doc, "points": pts + [
+        {"idx": last["idx"] + 1, "phase": last["phase"], "name": "Clear", "mode": "all",
+         "conditions": [{"type": "kill"}], "tags": []}]})
 
 
 def _rows(doc):
@@ -91,9 +123,29 @@ def save_state(db, char_id, encounter, state, now):
 
 # ------------------------------------------------------------------ the two modes
 
-def failed_cleanup_points(state, tag=CLEANUP_TAG):
+def adjusted_reached(doc, reached, tag=CLEANUP_TAG):
+    """A pull that got to the next point without the cleanup tag also counts as having reached the cleanup
+    point before it (you only move on once the cleanup is done)."""
+    out, top = set(reached), max(reached, default=-1)
+    for pt in doc["points"]:
+        if tag in pt["tags"]:
+            nxt = min((q["idx"] for q in doc["points"] if q["idx"] > pt["idx"] and tag not in q["tags"]), default=None)
+            if nxt is not None and top >= nxt:
+                out.add(pt["idx"])
+    return sorted(out)
+
+
+def cleanup_report(doc, state, tag=CLEANUP_TAG):
+    """The tag report for `tag`, recomputed from the stored pulls with the next-point rule above.
+    -> {'consistent': bool, 'points': [{idx, name, phase, reached, of, need, ok}]} or None if nothing is tagged."""
+    pulls = [{**p, "reached": adjusted_reached(doc, p["reached"], tag)} for p in state["pulls"].values() if "reached" in p]
+    return progpoints.tag_report(doc, pulls).get(tag)
+
+
+def failed_cleanup_points(doc, state, tag=CLEANUP_TAG):
     """idx of the tagged points whose consistency check failed."""
-    return {p["idx"] for p in (state.get("tags") or {}).get(tag, {}).get("points", []) if not p["ok"]}
+    rep = cleanup_report(doc, state, tag)
+    return {p["idx"] for p in rep["points"] if not p["ok"]} if rep else set()
 
 
 def effective_highest(doc, state, mode="normal"):
@@ -105,7 +157,7 @@ def effective_highest(doc, state, mode="normal"):
         raise ValueError(f"mode must be one of {', '.join(MODES)}")
     if mode == "normal":
         return state.get("highest")
-    skip = failed_cleanup_points(state)
+    skip = failed_cleanup_points(doc, state)
     info = {p["idx"]: p for p in doc["points"]}
     best = None
     for key, pull in state["pulls"].items():
@@ -115,19 +167,73 @@ def effective_highest(doc, state, mode="normal"):
     return best
 
 
-def cleanup_lines(state):
-    """Human-readable consistency of the cleanup points, one per line ('' list when none are tagged)."""
-    pts = (state.get("tags") or {}).get(CLEANUP_TAG, {}).get("points", [])
+def cleanup_lines(doc, state):
+    """Human-readable consistency of the cleanup points, one per line (empty when none are tagged)."""
+    rep = cleanup_report(doc, state)
     return [f"{'✅' if p['ok'] else '❌'} {p['phase']} {p['name']}: reached in {p['reached']} of the last "
-            f"{p['of']} pulls (needs {p['need']})" for p in pts]
+            f"{p['of']} pulls (needs {p['need']})" for p in rep["points"]] if rep else []
+
+
+# ------------------------------------------------------------------ confirmed prog (never goes down)
+
+def get_scores(db, char_id, encounter):
+    return db.conn.execute("SELECT * FROM prog_scores WHERE character_id = ? AND encounter = ?",
+                           (char_id, encounter)).fetchone()
+
+
+def record_result(db, char_id, encounter, chosen, mode, state, now):
+    """Store this run's highest as `latest`, and raise `confirmed` if it beats it. Returns (row, raised)."""
+    row = get_scores(db, char_id, encounter)
+    raised = bool(chosen) and (row["confirmed_idx"] is None or chosen["idx"] > row["confirmed_idx"])
+    with db.conn:
+        db.conn.execute("UPDATE prog_scores SET latest_idx = ?, latest_mode = ?, latest_utc = ? "
+                        "WHERE character_id = ? AND encounter = ?",
+                        (chosen["idx"] if chosen else None, mode, iso(now), char_id, encounter))
+        if raised:
+            at_ms = (state["pulls"].get(chosen.get("pull")) or {}).get("at")
+            when = datetime.fromtimestamp(at_ms / 1000, timezone.utc) if at_ms else now
+            db.conn.execute("UPDATE prog_scores SET confirmed_idx = ?, confirmed_mode = ?, confirmed_utc = ? "
+                            "WHERE character_id = ? AND encounter = ?",
+                            (chosen["idx"], mode, iso(when), char_id, encounter))
+    return get_scores(db, char_id, encounter), raised
 
 
 # ------------------------------------------------------------------ scoring
 
-async def score_character(ctx, char, doc, *, count=10, reset=False, progress=None):
+async def recent_codes(ctx, char, count, hours):
+    """Codes of the character's newest reports, at most `count`, and only those that started within `hours`
+    (hours 0/None = no time limit)."""
+    since = (ctx.now() - timedelta(hours=hours)).timestamp() * 1000 if hours else None
+    codes, page = [], 1
+    while len(codes) < count:
+        limit = min(count - len(codes), 100)
+        if char["fflogs_id"]:
+            data = await ctx.fflogs.query(prog_scorer.CHAR_ID_QUERY, {"id": int(char["fflogs_id"]), "limit": limit, "page": page})
+        else:
+            data = await ctx.fflogs.query(prog_scorer.CHAR_QUERY, {
+                "name": char["name"], "server": char["world"].lower(),
+                "region": ctx.cfg.get("lodestone_region", "na").upper(), "limit": limit, "page": page})
+        found = ((data or {}).get("characterData") or {}).get("character")
+        if not found:
+            raise FFLogsError(f"Character {char['name']} not found on FFLogs.")
+        reports = found["recentReports"]
+        old = False
+        for r in reports["data"]:                       # newest first
+            if since is not None and r["startTime"] < since:
+                old = True
+                break
+            codes.append(r["code"])
+        if old or not reports.get("has_more_pages") or not reports["data"]:
+            break
+        page += 1
+    return codes[:count]
+
+
+async def score_character(ctx, char, doc, *, count=10, hours=24, reset=False, progress=None):
     """Score a character's recent logs, keeping the stored state up to date after every report.
 
-    Returns (state, restarted_reason or None). Raises FFLogsError (FFLogs trouble) or ProgPointError."""
+    Only reports from the last `hours` hours are read (0 = no limit; `count` always applies). Returns
+    (state, restarted_reason or None). Raises FFLogsError (FFLogs trouble) or ProgPointError."""
     enc = prog_scorer.resolve_encounter(doc, None)
     state, restarted = (None if reset else load_state(ctx.db, char["id"], enc)), None
     if state is not None:
@@ -137,13 +243,11 @@ async def score_character(ctx, char, doc, *, count=10, reset=False, progress=Non
             state, restarted = None, str(e)
     if state is None:
         state = prog_scorer.new_state(doc, char["name"], enc)
-    kw = {"server": char["world"].lower()}      # slug for the name lookup; also tells same-name players apart
-    if char["fflogs_id"]:
-        kw["fflogs_id"] = char["fflogs_id"]
-    else:
-        kw["region"] = ctx.cfg.get("lodestone_region", "na").upper()
-    state = await prog_scorer.score_player_async(
-        ctx.fflogs.query, doc, state, char["name"], enc, count=count, progress=progress,
-        checkpoint=lambda st: save_state(ctx.db, char["id"], enc, st, ctx.now()), **kw)
+    codes = await recent_codes(ctx, char, count, hours)
+    if codes:                                     # (an empty list would make the scorer fetch its own)
+        state = await prog_scorer.score_player_async(
+            ctx.fflogs.query, doc, state, char["name"], enc, reports=codes, progress=progress,
+            server=char["world"].lower(),
+            checkpoint=lambda st: save_state(ctx.db, char["id"], enc, st, ctx.now()))
     save_state(ctx.db, char["id"], enc, state, ctx.now())
     return state, restarted

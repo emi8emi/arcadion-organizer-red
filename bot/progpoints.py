@@ -14,6 +14,7 @@ Condition types (times are seconds from pull start):
   hp     {enemy: name|null, lte}   first time that enemy's HP% <= lte (null = the main boss HP series)
   phase  {id}                      the pull entered that phase
   time   {gte, since_phase?}       the pull lasted at least gte seconds (from pull start or a phase start)
+  kill   {}                        the pull was a kill (reached at the end of the pull)
 
 A point with mode "all" (default) is reached when every condition fired; "any" when at least one did.
 `idx` matches checkpoints(fight_id, idx, phase, name) / players.prog_index in the bot schema.
@@ -76,6 +77,8 @@ def normalize_condition(c):
             raise ProgPointError("A time condition needs 'gte'.")
         since = c.get("since_phase")
         return {"type": "time", "gte": float(c["gte"]), "since_phase": None if since is None else int(since)}
+    if t == "kill":
+        return {"type": "kill"}
     raise ProgPointError(f"Unknown condition type {t!r}.")
 
 
@@ -232,6 +235,8 @@ def condition_time(cond, pull):
                 return None
         t_hit = base + cond["gte"]
         return t_hit if t_hit <= pull.get("duration", 0) else None
+    if t == "kill":
+        return pull.get("duration", 0) if pull.get("kill") else None
     return None
 
 

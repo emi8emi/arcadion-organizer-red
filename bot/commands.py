@@ -180,7 +180,8 @@ class DebugGroup(app_commands.Group):
 
     @app_commands.command(name="score", description="Testing: score a player's FFLogs and set their prog to the highest found")
     @app_commands.describe(member="Whose logs", mode="normal ignores the cleanup tag; consistent requires cleanup points to pass the check",
-                           count="How many recent reports to read (default 10)",
+                           count="Most reports to read (default 10)",
+                           hours="Only reports from the last N hours (default 24, 0 = no limit)",
                            character="Which character, if they have several",
                            reset="Throw away stored scores and start over",
                            content="The fight (optional while there is only one)")
@@ -188,8 +189,9 @@ class DebugGroup(app_commands.Group):
                                 app_commands.Choice(name="Consistent (check cleanup tag)", value="consistent")])
     async def score(self, interaction: discord.Interaction, member: discord.Member,
                     mode: app_commands.Choice[str], count: int = 10, character: Optional[str] = None,
-                    reset: bool = False, content: Optional[str] = None):
-        await handlers.debug_score(self.ctx, interaction, member, mode.value, count, character, reset, content)
+                    reset: bool = False, content: Optional[str] = None,
+                    hours: Optional[int] = None):
+        await handlers.debug_score(self.ctx, interaction, member, mode.value, count, character, reset, content, hours)
 
     @app_commands.command(name="sync_checkpoints", description="Testing: make the fight's checkpoints match its prog point file")
     @app_commands.describe(confirm="Replace the checkpoints and clear every player's prog",

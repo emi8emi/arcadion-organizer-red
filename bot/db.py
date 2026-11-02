@@ -80,8 +80,8 @@ class DB:
                 self.conn.execute("DROP TABLE votes_old")
         from .characters import ensure_schema          # characters tables, and the move off the soft-link version
         ensure_schema(self.conn)
-        from .progscore import SCHEMA as PROG_SCHEMA
-        self.conn.executescript(PROG_SCHEMA)
+        from .progscore import ensure_schema as ensure_prog_schema
+        ensure_prog_schema(self.conn)
         with self.conn:
             self.conn.execute(
                 """CREATE TABLE IF NOT EXISTS guild_settings (
