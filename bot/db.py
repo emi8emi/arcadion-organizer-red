@@ -10,6 +10,7 @@ from pathlib import Path
 from .config import ROLES
 
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schema.sql"
+PROG_POINTS_DIR = Path(__file__).resolve().parent.parent / "prog_points"
 
 
 GUILD_SETTING_KEYS = ("organizer_role_id", "reminder_channel_id", "parties_channel_id")
@@ -46,7 +47,7 @@ def _member_dict(m):
 
 
 class DB:
-    def __init__(self, path=":memory:"):
+    def __init__(self, path=":memory:", prog_dir=None):
         self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
@@ -54,6 +55,8 @@ class DB:
         self.conn.executescript(SCHEMA_PATH.read_text())
         self._migrate()
         self.conn.commit()
+        from .progscore import sync_fights               # fights + checkpoints come from the prog point files
+        sync_fights(self, prog_dir or PROG_POINTS_DIR)
 
     def _park_old_votes(self):
         """Early skeletons had an unused `votes` table (yes/neutral/no, one row per slot and pair).

@@ -23,6 +23,8 @@ A point with mode "all" (default) is reached when every condition fired; "any" w
 clears it was built from; `encounter` is a free-form short label (e.g. "UWU"). The scorer uses `encounter_id`
 when --encounter is not given, and refuses a mismatch.
 
+`display_name` (optional) is the fight's name in the Discord bot when it creates the fight from this file.
+
 Tags: a point may carry `"tags": ["cleanup"]`. The scorer reports, per tag, whether the player reached every tagged
 point in at least `min` of their most recent `of` pulls (default 3 of 5). Per-tag overrides go in the file:
     "tag_rules": {"cleanup": {"min": 4, "of": 6}}
@@ -138,7 +140,8 @@ def load_points(source):
     enc_id = doc.get("encounter_id")
     return {"version": VERSION, "encounter": doc.get("encounter", ""),
             "encounter_id": int(enc_id) if enc_id not in (None, "") else None,
-            "encounter_name": doc.get("encounter_name") or "", "points": pts, "tag_rules": rules}
+            "encounter_name": doc.get("encounter_name") or "", "display_name": doc.get("display_name") or "",
+            "points": pts, "tag_rules": rules}
 
 
 def fingerprint(doc):

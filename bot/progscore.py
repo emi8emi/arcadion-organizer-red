@@ -11,6 +11,8 @@ Modes for points tagged `cleanup` (see `effective_highest`):
                after it, but only for a character whose current prog is below it.
 """
 import json
+import logging
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 from . import prog_scorer, progpoints
@@ -49,6 +51,7 @@ def ensure_schema(conn):
 MODES = ("normal", "consistent")
 CLEANUP_TAG = "cleanup"
 
+log = logging.getLogger("raidbot")
 ProgPointError, ScorerError = progpoints.ProgPointError, prog_scorer.ScorerError
 
 
@@ -88,22 +91,113 @@ def checkpoints_match(db, fight_id, doc):
     return [(c["idx"], c["phase"], c["name"]) for c in db.checkpoints(fight_id)] == _rows(doc)
 
 
-def sync_checkpoints(db, fight_id, doc):
-    """Make the fight's checkpoints equal the prog point file. Returns how many players had a prog set.
+def checkpoint_remap(old, new):
+    """{old idx: new idx} for moving stored checkpoint numbers from one list of (idx, phase, name) to another.
 
-    Old prog_index values mean something else under the new numbering, so they are cleared (the player
-    picks again in /availability, or the scorer sets it)."""
+    A point is matched by (phase, name); failing that by (position of its phase, name) when both lists have the
+    same number of phases (a renamed phase); failing that by a name that is unique in both. A point that
+    matches nothing becomes the nearest earlier point that did (0 if none): a conservative prog, never a higher one."""
+    def phases(rows):
+        out = []
+        for _, ph, _ in rows:
+            if ph.lower() not in out:
+                out.append(ph.lower())
+        return out
+    old_ph, new_ph = phases(old), phases(new)
+    same_phases = len(old_ph) == len(new_ph)
+    by_phase_name = {(ph.lower(), n.lower()): i for i, ph, n in new}
+    by_pos_name = {(new_ph.index(ph.lower()), n.lower()): i for i, ph, n in new}
+    names = [n.lower() for _, _, n in new]
+    old_names = [n.lower() for _, _, n in old]
+    out, last = {}, 0
+    for idx, ph, n in sorted(old):
+        hit = by_phase_name.get((ph.lower(), n.lower()))
+        if hit is None and same_phases:
+            hit = by_pos_name.get((old_ph.index(ph.lower()), n.lower()))
+        if hit is None and names.count(n.lower()) == 1 and old_names.count(n.lower()) == 1:
+            hit = next(i for i, _, nn in new if nn.lower() == n.lower())
+        last = out[idx] = last if hit is None else hit
+    return out
+
+
+def _apply_remap(db, fight_id, encounter, remap):
+    """Rewrite every stored checkpoint number that belongs to this fight. Returns how many rows changed."""
+    changed = 0
+    conn = db.conn
+
+    def rewrite(select, update, params=()):
+        nonlocal changed
+        for row in conn.execute(select, params).fetchall():
+            new = remap.get(row[1], row[1])
+            if new != row[1]:
+                conn.execute(update, (new, row[0]))
+                changed += 1
+    runs = "(SELECT id FROM runs WHERE fight_id = ?)"
+    rewrite(f"SELECT rowid, prog_index FROM day_snapshots WHERE prog_index IS NOT NULL AND run_id IN {runs}",
+            "UPDATE day_snapshots SET prog_index = ? WHERE rowid = ?", (fight_id,))
+    rewrite(f"SELECT id, target_idx FROM parties WHERE target_idx IS NOT NULL AND run_id IN {runs}",
+            "UPDATE parties SET target_idx = ? WHERE id = ?", (fight_id,))
+    rewrite(f"SELECT party_id, target_idx FROM party_originals WHERE target_idx IS NOT NULL AND run_id IN {runs}",
+            "UPDATE party_originals SET target_idx = ? WHERE party_id = ?", (fight_id,))
+    if conn.execute("SELECT COUNT(DISTINCT fight_id) FROM checkpoints").fetchone()[0] <= 1:
+        # players.prog_index is not per fight, so it can only be moved while there is a single fight
+        rewrite("SELECT discord_id, prog_index FROM players WHERE prog_index IS NOT NULL",
+                "UPDATE players SET prog_index = ? WHERE discord_id = ?")
+    if encounter is not None:
+        for col in ("confirmed_idx", "latest_idx"):
+            rewrite(f"SELECT character_id, {col} FROM prog_scores WHERE encounter = {int(encounter)} AND {col} IS NOT NULL",
+                    f"UPDATE prog_scores SET {col} = ? WHERE character_id = ? AND encounter = {int(encounter)}")
+    return changed
+
+
+def sync_fight(db, doc, fallback_short=None):
+    """Create the fight for this prog point document if needed and make its checkpoints equal the document's.
+
+    Stored checkpoint numbers (players, signup snapshots, party targets, scorer results) are moved to the new
+    numbering with `checkpoint_remap`. Returns {'fight_id', 'created', 'changed', 'remapped'}."""
+    short = doc.get("encounter") or fallback_short
+    if not short:
+        raise ProgPointError("The prog point file needs an 'encounter' short name (like UWU).")
+    row = db.conn.execute("SELECT * FROM fights WHERE lower(short_name) = lower(?)", (short,)).fetchone()
+    created = row is None
     with db.conn:
-        db.conn.execute("DELETE FROM checkpoints WHERE fight_id = ?", (fight_id,))
-        db.conn.executemany("INSERT INTO checkpoints (fight_id, idx, phase, name) VALUES (?, ?, ?, ?)",
-                            [(fight_id, *r) for r in _rows(doc)])
-        n = db.conn.execute("SELECT COUNT(*) FROM players WHERE prog_index IS NOT NULL").fetchone()[0]
-        db.conn.execute("UPDATE players SET prog_index = NULL")
-    return n
+        if created:
+            name = doc.get("display_name") or doc.get("encounter_name") or short
+            if db.conn.execute("SELECT 1 FROM fights WHERE name = ?", (name,)).fetchone():
+                name = f"{name} ({short})"
+            cur = db.conn.execute("INSERT INTO fights (name, short_name) VALUES (?, ?)", (name, short))
+            fight_id = cur.lastrowid
+        else:
+            fight_id = row["id"]
+        old = [(c["idx"], c["phase"], c["name"]) for c in db.checkpoints(fight_id)]
+        new = _rows(doc)
+        changed = old != new
+        remapped = 0
+        if changed:
+            remap = checkpoint_remap(old, new) if old else {}
+            db.conn.execute("DELETE FROM checkpoints WHERE fight_id = ?", (fight_id,))
+            db.conn.executemany("INSERT INTO checkpoints (fight_id, idx, phase, name) VALUES (?, ?, ?, ?)",
+                                [(fight_id, *r) for r in new])
+            if remap:
+                remapped = _apply_remap(db, fight_id, doc.get("encounter_id"), remap)
+    return {"fight_id": fight_id, "created": created, "changed": changed, "remapped": remapped}
 
 
-def players_with_prog(db):
-    return db.conn.execute("SELECT COUNT(*) FROM players WHERE prog_index IS NOT NULL").fetchone()[0]
+def sync_fights(db, folder):
+    """Sync every prog point file in `folder` (prog_points/*.json). A broken file is logged and skipped."""
+    reports = []
+    folder = Path(folder)
+    for path in sorted(folder.glob("*.json")) if folder.is_dir() else []:
+        try:
+            doc = with_clear(progpoints.load_points(path))
+            rep = sync_fight(db, doc, path.stem)
+        except (ProgPointError, OSError) as e:
+            log.warning("prog point file %s skipped: %s", path.name, e)
+            continue
+        if rep["created"] or rep["changed"]:
+            log.info("fight %s synced from %s (%d stored number(s) moved)", rep["fight_id"], path.name, rep["remapped"])
+        reports.append(rep)
+    return reports
 
 
 # ------------------------------------------------------------------ stored state

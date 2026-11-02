@@ -96,6 +96,14 @@ def player(user_id, name=None, **kw):
     return FakeInteraction(user_id=user_id, name=name or f"Player {user_id}", **kw)
 
 
+@pytest.fixture(autouse=True)
+def test_prog_points(monkeypatch):
+    """Every DB the tests open builds its fights from a small fixed UWU file (the 19 old checkpoints plus the
+    automatic Clear), not from the real prog_points/ folder, so edits to the real file do not break the tests."""
+    import bot.db
+    monkeypatch.setattr(bot.db, "PROG_POINTS_DIR", Path(__file__).resolve().parent / "fixtures" / "prog_points")
+
+
 @pytest.fixture
 def cfg(tmp_path):
     c = load_config(env={})

@@ -120,7 +120,7 @@ every party in the draft matches the signups (known slot and players, ticked slo
 
 * `solver_phase_cross_cost` in `config.json` must equal `phase_cross_cost` in `raid-solver/config.json` (3).
   The bot uses it to turn "OK with N checkpoints lower" into the solver's distance units.
-* Checkpoints (19 for Ultima Weapon, index 0 = P1 fresh ... 18 = P4 enrage) live in `schema.sql`.
+* Fights and their checkpoints come from `prog_points/<SHORT>.json` (the files the prog point editor writes), not from SQL. On every start the bot creates the fight if it is new and, when a file changed, replaces its checkpoints and moves stored numbers (players' prog, signup snapshots, party targets, scorer results) to the new numbering by phase and name. Every fight gets a final `Clear` point (a kill) automatically. An optional `display_name` in the file is the name players see.
 
 ## Layout
 
@@ -129,7 +129,7 @@ bot/grid.py        slot grid (America/New_York, DST safe)      bot/solver_io.py 
 bot/db.py          SQLite layer                                 bot/heatmap.py    /run status table
 bot/handlers.py    command logic (no Discord decorators)        bot/views.py      /availability menu and modal
 bot/commands.py    slash command registration                   bot/app.py        client, command sync
-schema.sql         tables + the Ultima Weapon checkpoints       tests/            pytest suite
+schema.sql         tables (fights come from prog_points/)       tests/            pytest suite
 bot/seed.py        fake test players (python -m bot.seed)
 ```
 

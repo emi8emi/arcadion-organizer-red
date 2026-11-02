@@ -193,12 +193,10 @@ class DebugGroup(app_commands.Group):
                     hours: Optional[int] = None):
         await handlers.debug_score(self.ctx, interaction, member, mode.value, count, character, reset, content, hours)
 
-    @app_commands.command(name="sync_checkpoints", description="Testing: make the fight's checkpoints match its prog point file")
-    @app_commands.describe(confirm="Replace the checkpoints and clear every player's prog",
-                           content="The fight (optional while there is only one)")
-    async def sync_checkpoints(self, interaction: discord.Interaction, confirm: bool = False,
-                               content: Optional[str] = None):
-        await handlers.debug_sync_checkpoints(self.ctx, interaction, confirm, content)
+    @app_commands.command(name="sync_checkpoints", description="Testing: re-read the fight's prog point file now")
+    @app_commands.describe(content="The fight (optional while there is only one)")
+    async def sync_checkpoints(self, interaction: discord.Interaction, content: Optional[str] = None):
+        await handlers.debug_sync_checkpoints(self.ctx, interaction, content)
 
 
 class SettingsGroup(app_commands.Group):

@@ -5,20 +5,21 @@ from bot.db import DB, DraftConflict, DuplicateRun
 from conftest import NOW, add_player, confirm, fill_one_party
 
 
-def test_schema_is_idempotent_and_seeds_the_fight_once(tmp_path):
+def test_schema_is_idempotent_and_syncs_the_fight_once(tmp_path):
     path = str(tmp_path / "bot.sqlite3")
     DB(path).close()
     db = DB(path)                                   # opening again re-runs schema.sql
     assert len(db.fights()) == 1
-    assert len(db.checkpoints(1)) == 19
+    assert len(db.checkpoints(1)) == 20           # the 19 points of the test file plus the automatic Clear
 
 
-def test_ultima_weapon_checkpoints_are_the_agreed_19(ctx):
+def test_checkpoints_come_from_the_prog_point_file(ctx):
     cps = ctx.db.checkpoints(1)
-    assert [c["idx"] for c in cps] == list(range(19))
+    assert [c["idx"] for c in cps] == list(range(20))
     names = [f"{c['phase']} {c['name']}" for c in cps]
     assert names[0] == "P1 Fresh" and names[4] == "P1 Enrage" and names[11] == "P3 Gaols cleanup"
     assert names[14] == "Intermission Intermission" and names[18] == "P4 Enrage"
+    assert names[19] == "P4 Clear"                                  # every fight ends with Clear
     phases = [c["phase"] for c in cps]
     assert [p for i, p in enumerate(phases) if i == 0 or p != phases[i - 1]] == ["P1", "P2", "P3", "Intermission", "P4"]
 

@@ -28,7 +28,7 @@ def build_ctx(cfg):
     path = path if path == ":memory:" or path.startswith("/") else str(ROOT / path)
     fflogs = (FFLogsClient(cfg["fflogs_client_id"], cfg["fflogs_client_secret"])
         if cfg.get("fflogs_client_id") and cfg.get("fflogs_client_secret") else None)
-    return Ctx(db=DB(path), cfg=cfg, grid=GridConfig.from_config(cfg),
+    return Ctx(db=DB(path, ROOT / cfg.get("prog_points_dir", "prog_points")), cfg=cfg, grid=GridConfig.from_config(cfg),
         lodestone=LodestoneClient(cfg["lodestone_region"]), fflogs=fflogs)
 
 

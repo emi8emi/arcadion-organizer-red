@@ -1,0 +1,256 @@
+{
+ "version": 1,
+ "encounter": "UWU",
+ "display_name": "Ultima Weapon (Ultimate)",
+ "encounter_id": 1074,
+ "encounter_name": "The Ultima Weapon",
+ "points": [
+  {
+   "idx": 0,
+   "phase": "P1",
+   "name": "Fresh",
+   "mode": "all",
+   "conditions": [
+    {
+     "type": "time",
+     "gte": 0
+    }
+   ],
+   "tags": []
+  },
+  {
+   "idx": 1,
+   "phase": "P1",
+   "name": "Plumes",
+   "mode": "all",
+   "conditions": [
+    {
+     "type": "time",
+     "gte": 10
+    }
+   ],
+   "tags": []
+  },
+  {
+   "idx": 2,
+   "phase": "P1",
+   "name": "Cleanse",
+   "mode": "all",
+   "conditions": [
+    {
+     "type": "time",
+     "gte": 20
+    }
+   ],
+   "tags": []
+  },
+  {
+   "idx": 3,
+   "phase": "P1",
+   "name": "Twins bait",
+   "mode": "all",
+   "conditions": [
+    {
+     "type": "time",
+     "gte": 30
+    }
+   ],
+   "tags": []
+  },
+  {
+   "idx": 4,
+   "phase": "P1",
+   "name": "Enrage",
+   "mode": "all",
+   "conditions": [
+    {
+     "type": "time",
+     "gte": 40
+    }
+   ],
+   "tags": []
+  },
+  {
+   "idx": 5,
+   "phase": "P2",
+   "name": "Fresh",
+   "mode": "all",
+   "conditions": [
+    {
+     "type": "time",
+     "gte": 50
+    }
+   ],
+   "tags": []
+  },
+  {
+   "idx": 6,
+   "phase": "P2",
+   "name": "Nails",
+   "mode": "all",
+   "conditions": [
+    {
+     "type": "time",
+     "gte": 60
+    }
+   ],
+   "tags": []
+  },
+  {
+   "idx": 7,
+   "phase": "P2",
+   "name": "Nails cleanup",
+   "mode": "all",
+   "conditions": [
+    {
+     "type": "time",
+     "gte": 70
+    }
+   ],
+   "tags": []
+  },
+  {
+   "idx": 8,
+   "phase": "P2",
+   "name": "Enrage",
+   "mode": "all",
+   "conditions": [
+    {
+     "type": "time",
+     "gte": 80
+    }
+   ],
+   "tags": []
+  },
+  {
+   "idx": 9,
+   "phase": "P3",
+   "name": "Fresh",
+   "mode": "all",
+   "conditions": [
+    {
+     "type": "time",
+     "gte": 90
+    }
+   ],
+   "tags": []
+  },
+  {
+   "idx": 10,
+   "phase": "P3",
+   "name": "Gaols",
+   "mode": "all",
+   "conditions": [
+    {
+     "type": "time",
+     "gte": 100
+    }
+   ],
+   "tags": []
+  },
+  {
+   "idx": 11,
+   "phase": "P3",
+   "name": "Gaols cleanup",
+   "mode": "all",
+   "conditions": [
+    {
+     "type": "time",
+     "gte": 110
+    }
+   ],
+   "tags": []
+  },
+  {
+   "idx": 12,
+   "phase": "P3",
+   "name": "Mario kart",
+   "mode": "all",
+   "conditions": [
+    {
+     "type": "time",
+     "gte": 120
+    }
+   ],
+   "tags": []
+  },
+  {
+   "idx": 13,
+   "phase": "P3",
+   "name": "Enrage",
+   "mode": "all",
+   "conditions": [
+    {
+     "type": "time",
+     "gte": 130
+    }
+   ],
+   "tags": []
+  },
+  {
+   "idx": 14,
+   "phase": "Intermission",
+   "name": "Intermission",
+   "mode": "all",
+   "conditions": [
+    {
+     "type": "time",
+     "gte": 140
+    }
+   ],
+   "tags": []
+  },
+  {
+   "idx": 15,
+   "phase": "P4",
+   "name": "Predation",
+   "mode": "all",
+   "conditions": [
+    {
+     "type": "time",
+     "gte": 150
+    }
+   ],
+   "tags": []
+  },
+  {
+   "idx": 16,
+   "phase": "P4",
+   "name": "Annihilation",
+   "mode": "all",
+   "conditions": [
+    {
+     "type": "time",
+     "gte": 160
+    }
+   ],
+   "tags": []
+  },
+  {
+   "idx": 17,
+   "phase": "P4",
+   "name": "Suppression",
+   "mode": "all",
+   "conditions": [
+    {
+     "type": "time",
+     "gte": 170
+    }
+   ],
+   "tags": []
+  },
+  {
+   "idx": 18,
+   "phase": "P4",
+   "name": "Enrage",
+   "mode": "all",
+   "conditions": [
+    {
+     "type": "time",
+     "gte": 180
+    }
+   ],
+   "tags": []
+  }
+ ]
+}

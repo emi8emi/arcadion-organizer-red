@@ -175,29 +175,8 @@ CREATE INDEX IF NOT EXISTS idx_slots_run ON slots(run_id);
 CREATE INDEX IF NOT EXISTS idx_avail_slot ON availability(slot_id);
 CREATE INDEX IF NOT EXISTS idx_parties_run ON parties(run_id);
 
--- Seed: Ultima Weapon (Ultimate), 19 positions (0 = P1 fresh ... 18 = P4 enrage).
-INSERT OR IGNORE INTO fights (id, name, short_name) VALUES (1, 'Ultima Weapon (Ultimate)', 'UWU');
-
-INSERT OR IGNORE INTO checkpoints (fight_id, idx, phase, name) VALUES
-    (1,  0, 'P1', 'Fresh'),
-    (1,  1, 'P1', 'Plumes'),
-    (1,  2, 'P1', 'Cleanse'),
-    (1,  3, 'P1', 'Twins bait'),
-    (1,  4, 'P1', 'Enrage'),
-    (1,  5, 'P2', 'Fresh'),
-    (1,  6, 'P2', 'Nails'),
-    (1,  7, 'P2', 'Nails cleanup'),
-    (1,  8, 'P2', 'Enrage'),
-    (1,  9, 'P3', 'Fresh'),
-    (1, 10, 'P3', 'Gaols'),
-    (1, 11, 'P3', 'Gaols cleanup'),
-    (1, 12, 'P3', 'Mario kart'),
-    (1, 13, 'P3', 'Enrage'),
-    (1, 14, 'Intermission', 'Intermission'),
-    (1, 15, 'P4', 'Predation'),
-    (1, 16, 'P4', 'Annihilation'),
-    (1, 17, 'P4', 'Suppression'),
-    (1, 18, 'P4', 'Enrage');
+-- Fights and their checkpoints are not seeded here: the bot creates them from prog_points/*.json on start
+-- (see bot/progscore.py sync_fights).
 
 -- Ratings between players who shared a confirmed party. Append-only: the latest row per (voter, target)
 -- is the current vote, and 'neutral' is stored so a changed mind clears an earlier like or dislike.

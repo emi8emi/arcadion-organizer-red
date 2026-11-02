@@ -720,8 +720,10 @@ async def debug_setprog(ctx, interaction, member, checkpoint, content=None):
     await say(interaction, f"{member.display_name}'s prog is now {_prog_text(cps, checkpoint)}.")
 
 
-async def debug_sync_checkpoints(ctx, interaction, confirm=False, content=None):
-    """Testing aid: make the fight's checkpoints match its prog point file (needed once, before scoring)."""
+async def debug_sync_checkpoints(ctx, interaction, content=None):
+    """Testing aid: re-read the fight's prog point file now (the bot also does this on every start).
+
+    Stored prog numbers are moved to the new numbering by phase and name, never cleared."""
     if not await require_organizer(ctx, interaction):
         return
     fight = await _debug_fight(ctx, interaction, content)
@@ -729,19 +731,13 @@ async def debug_sync_checkpoints(ctx, interaction, confirm=False, content=None):
         return
     try:
         doc = progscore.load_doc(ctx.cfg, fight)
+        rep = progscore.sync_fight(ctx.db, doc, fight["short_name"])
     except progscore.ProgPointError as e:
         return await say(interaction, str(e))
-    if progscore.checkpoints_match(ctx.db, fight["id"], doc):
+    if not rep["changed"]:
         return await say(interaction, "The checkpoints already match the prog point file.")
-    affected = progscore.players_with_prog(ctx.db)
-    if not confirm:
-        return await say(interaction, (
-            f"The checkpoints differ from the prog point file ({len(doc['points'])} points vs "
-            f"{len(ctx.db.checkpoints(fight['id']))} now). Syncing replaces them and clears the prog of "
-            f"{affected} player(s), since the numbers change meaning. Run again with confirm:True to do it."))
-    progscore.sync_checkpoints(ctx.db, fight["id"], doc)
     await say(interaction, f"Checkpoints replaced with the {len(doc['points'])} points of the prog point file; "
-                           f"cleared the prog of {affected} player(s).")
+                           f"{rep['remapped']} stored prog number(s) moved to the new numbering.")
 
 
 def _score_summary(doc, state, name, current=None):
@@ -787,7 +783,7 @@ async def debug_score(ctx, interaction, member, mode="normal", count=10, charact
         return await say(interaction, str(e))
     if not progscore.checkpoints_match(ctx.db, fight["id"], doc):
         return await say(interaction, "This fight's checkpoints do not match its prog point file, so the scored "
-                                      "numbers would point at the wrong checkpoints. Run /debug sync_checkpoints first.")
+                                      "numbers would point at the wrong checkpoints. Run /debug sync_checkpoints first (the bot also syncs on every start).")
     chars = ch.list_characters(ctx.db, member.id)
     if character:
         chars = [c for c in chars if character.lower() in (c["name"].lower(), ch.label(c).lower())]

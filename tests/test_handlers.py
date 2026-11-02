@@ -205,7 +205,7 @@ def test_menu_saves_every_click(ctx, make_run):
         view = msg["view"]
         assert isinstance(view, AvailabilityView) and msg["ephemeral"] is True
         assert len(view.children) == 9           # 3 role toggles, Limits, Done, prog, day, character, slots
-        assert [o.value for o in view.prog_select.options] == [str(i) for i in range(19)]
+        assert [o.value for o in view.prog_select.options] == [str(i) for i in range(20)]
         assert [o.value for o in view.day_select.options] == ["2026-11-01", "2026-11-02", "2026-11-03"]
         assert "⚠ Set your roles and prog" in msg["content"] and msg["content"].count("<t:") == 4   # the picked day's cutoff plus one per day
 
@@ -326,7 +326,7 @@ def test_limits_command_validates(ctx, make_run):
     make_run()
     for args, message in [((0, None, None), "between 1 and 8"), ((None, 99, None), "between 1 and 40"),
                           ((None, 1, None), "cannot be smaller than your max per day"),
-                          ((None, None, 19), "between 0")]:
+                          ((None, None, 20), "between 0")]:
         assert message in do(ctx, handlers.limits, player(5), *args).text, args
     do(ctx, handlers.limits, player(5), 2, 4, None)          # the default per-run max is 99, so store a small one first
     assert "larger than your max per run" in do(ctx, handlers.limits, player(5), 5, None, None).text

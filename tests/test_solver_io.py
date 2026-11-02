@@ -29,7 +29,7 @@ def test_export_has_the_shape_the_solver_reads(ctx, world):
     assert warnings == []
     assert set(data) == {"version", "run", "fight", "slots", "players", "votes"} and data["votes"] == []
     assert data["run"] == {"name": "UWU week 1", "timezone": "America/New_York"}
-    assert len(data["fight"]["checkpoints"]) == 19
+    assert len(data["fight"]["checkpoints"]) == 20
     assert data["fight"]["checkpoints"][4] == {"index": 4, "phase": "P1", "name": "Enrage"}
     s = next(s for s in data["slots"] if s["id"] == SLOT)
     assert s == {"id": SLOT, "start": "2026-11-02T17:00:00-05:00", "minutes": 90}

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from bot import handlers, progpoints, prog_scorer, progscore
 from bot.fflogs import FFLogsError
+from bot.config import ROOT
 from conftest import NOW, organizer, run_async
 
 
@@ -71,13 +72,57 @@ def test_no_pulls_means_nothing_reached(ctx):
     assert progscore.effective_highest(doc, state, "consistent") is None
 
 
-def test_sync_checkpoints_replaces_them_and_clears_prog(ctx):
+def test_remap_matches_by_phase_and_name_then_by_phase_position():
+    old = [(0, "P1", "Fresh"), (1, "P1", "Plumes"), (2, "P2", "Fresh"), (3, "P2", "Enrage")]
+    new = [(0, "Garuda", "Fresh"), (1, "Ifrit", "Fresh"), (2, "Ifrit", "Eruption"), (3, "Ifrit", "Enrage")]
+    assert progscore.checkpoint_remap(old, old) == {0: 0, 1: 1, 2: 2, 3: 3}
+    # renamed phases (same count): matched by position; Plumes has no counterpart so it falls back to Fresh
+    assert progscore.checkpoint_remap(old, new) == {0: 0, 1: 0, 2: 1, 3: 3}
+    inserted = [(0, "P1", "Fresh"), (1, "P1", "New point"), (2, "P1", "Plumes"), (3, "P2", "Fresh"), (4, "P2", "Enrage")]
+    assert progscore.checkpoint_remap(old, inserted) == {0: 0, 1: 2, 2: 3, 3: 4}          # inserting shifts, nothing is lost
+
+
+def test_startup_sync_moves_stored_numbers_instead_of_clearing_them(ctx):
     doc = doc_of(ctx)
-    ctx.db.upsert_player(5, "P5", prog_index=3, now=NOW)
-    assert not progscore.checkpoints_match(ctx.db, 1, doc)            # the 19 seeded rows differ from the file
-    assert progscore.sync_checkpoints(ctx.db, 1, doc) == 1
+    assert not progscore.checkpoints_match(ctx.db, 1, doc)            # the test DB has the small 19-point file
+    ctx.db.upsert_player(5, "P5", prog_index=18, now=NOW)             # legacy "P4 Enrage"
+    ctx.db.upsert_player(6, "P6", prog_index=11, now=NOW)             # legacy "P3 Gaols cleanup"
+    ctx.db.upsert_player(7, "P7", now=NOW)                            # no prog stays no prog
+    assert progscore.sync_fights(ctx.db, ROOT / "prog_points")[0]["changed"]
     assert progscore.checkpoints_match(ctx.db, 1, doc)
-    assert ctx.db.get_player(5)["prog_index"] is None
+    assert ctx.db.get_player(5)["prog_index"] == 19                   # Ultima Enrage
+    assert ctx.db.get_player(6)["prog_index"] == 9                    # Titan Gaols
+    assert ctx.db.get_player(7)["prog_index"] is None
+    assert progscore.sync_fights(ctx.db, ROOT / "prog_points")[0]["changed"] is False        # second start: nothing
+
+
+def test_sync_moves_party_targets_snapshots_and_scorer_results(ctx, make_run):
+    from conftest import fill_one_party
+    run = make_run()
+    fill_one_party(ctx, run, prog=18)
+    ctx.db.conn.execute("INSERT INTO characters (discord_id, lodestone_id, name, world, verified_utc) VALUES ('1','9','A B','X','x')")
+    ctx.db.conn.execute("INSERT INTO prog_scores (character_id, encounter, state, updated_utc, confirmed_idx, latest_idx) "
+                        "VALUES (1, 1074, '{}', 'x', 18, 11)")
+    ctx.db.conn.commit()
+    progscore.sync_fights(ctx.db, ROOT / "prog_points")
+    row = ctx.db.conn.execute("SELECT confirmed_idx, latest_idx FROM prog_scores").fetchone()
+    assert (row[0], row[1]) == (19, 9)
+    assert {r[0] for r in ctx.db.conn.execute("SELECT prog_index FROM players")} == {19}
+
+
+def test_a_new_prog_point_file_creates_its_fight(ctx, tmp_path):
+    import json
+    doc = {"encounter": "TEA", "display_name": "The Epic of Alexander (Ultimate)", "encounter_id": 1062,
+           "points": [{"phase": "P1", "name": "Fresh", "conditions": [{"type": "time", "gte": 1}]},
+                      {"phase": "P2", "name": "Fresh", "conditions": [{"type": "time", "gte": 2}]}]}
+    (tmp_path / "TEA.json").write_text(json.dumps(doc))
+    (tmp_path / "broken.json").write_text("{ nope")                    # skipped, does not stop the others
+    reports = progscore.sync_fights(ctx.db, tmp_path)
+    assert len(reports) == 1 and reports[0]["created"]
+    fight = ctx.db.find_fight("TEA")
+    assert fight["name"] == "The Epic of Alexander (Ultimate)"
+    assert [c["name"] for c in ctx.db.checkpoints(fight["id"])] == ["Fresh", "Fresh", "Clear"]
+    assert len(ctx.db.checkpoints(1)) == 20                           # the other fight is untouched
 
 
 def test_state_round_trip(ctx):
@@ -106,7 +151,8 @@ def add_char(ctx, uid=7, name="Ann Tank", fflogs_id=900):
 
 
 def synced(ctx):
-    progscore.sync_checkpoints(ctx.db, 1, doc_of(ctx))
+    """Bring the test DB (which has the small 19-point test file) onto the real prog_points/UWU.json."""
+    progscore.sync_fights(ctx.db, ROOT / "prog_points")
 
 
 def test_debug_commands_are_for_organizers(ctx):
@@ -126,14 +172,15 @@ def test_setprog_sets_and_validates(ctx):
     assert "from 0 to 20" in it.text and ctx.db.get_player(7)["prog_index"] == 12
 
 
-def test_sync_needs_confirmation(ctx):
-    ctx.db.upsert_player(7, "Ann", prog_index=3, now=NOW)
+def test_sync_command_reports_what_it_moved(ctx):
+    ctx.db.upsert_player(7, "Ann", prog_index=18, now=NOW)
     it = organizer()
     run_async(handlers.debug_sync_checkpoints(ctx, it))
-    assert "confirm" in it.text and ctx.db.get_player(7)["prog_index"] == 3
+    assert "1 stored prog number" in it.text and ctx.db.get_player(7)["prog_index"] == 19
+    assert len(ctx.db.checkpoints(1)) == 21
     it = organizer()
-    run_async(handlers.debug_sync_checkpoints(ctx, it, confirm=True))
-    assert ctx.db.get_player(7)["prog_index"] is None and len(ctx.db.checkpoints(1)) == 21
+    run_async(handlers.debug_sync_checkpoints(ctx, it))
+    assert "already match" in it.text
 
 
 class FakeLogs:
