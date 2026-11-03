@@ -53,6 +53,31 @@ day's export with a warning), and "unmatched last time" looks at the previous da
 falling back to the previous run. Only **confirmed** parties count: if an earlier day still has an unapproved
 draft, the export says its parties are not counted (and which `/draft approve` to run).
 
+### Confirmations and the status dashboard
+
+* **Before approval:** `/draft confirm [day]` posts one message per slot in the parties channel, pinging that slot's
+  draft members, with **I'll be there** and **Can't make it** buttons. The message is edited as answers come in
+  (✅ confirmed, ⏳ waiting, ❌ can't make it). Running it again pings only the people who have not answered and
+  replaces the old message.
+* **Can't make it** asks for a reason, **unavailable at this slot** by default: it unticks that slot so the next
+  `/draft export` leaves the player out of it. Other reasons: *unavailable the whole day* (unticks the day), *don't
+  want this role or party* (ticks are kept; the organizers are told) and *other* (free text; unticks the slot). The
+  bot says in the channel what happened, pinging the organizer role. To fix the party the organizer re-exports, runs
+  the solver and runs `/draft import` as usual.
+* **Confirmations live per slot and player, not per party**, so a new draft keeps them for everyone still seated in
+  the same slot. A new import forgets declines and the rows of players who are no longer seated.
+* **After approval:** the slot thread gets the same message for everyone who has not confirmed (nobody is pinged
+  if all did). `confirm_reminder_hours` (default 3) before the slot, the minute loop pings the still-unconfirmed
+  once more. A decline in the thread tells the organizers to swap the player out with **Edit composition**; a
+  player swapped in is asked to confirm too.
+* **`/party dashboard [day]`** (organizers, private): a day picker, an "only needing attention" filter and a party
+  picker with a detail page (members and their confirmation, an **Open thread** link, **Nudge who hasn't answered**).
+  A party needs attention when: a draft has a declined player; an approved party has a declined player, is not
+  posted in a thread, has a thread the bot cannot open, has not-confirmed players within the reminder window, or
+  has fewer than the full party. 🔴 urgent (approved party), 🟠 needs a decision, 🟡 informational.
+* The solver is unchanged and knows nothing about confirmations, so a re-run may move someone who had confirmed.
+  Their confirmation stays valid only if they land in the same slot.
+
 ### Snapshots: a day's signups are frozen at its cutoff
 
 Roles, prog and limits belong to the player, not to a day. Without a snapshot, a player editing their profile
@@ -80,7 +105,7 @@ day: display name, roles, prog and their effective limits (defaults included).
 
 Config keys: `cutoff_time`, `cutoff_days_before`, `reminder_channel_id` (env `REMINDER_CHANNEL_ID`),
 `reminder_interval_minutes`, `organizer_role_id`, `parties_channel_id` (env `PARTIES_CHANNEL_ID`),
-`vote_window_hours` (72), `vote_expiry_days` (90), `vote_floor` (3).
+`vote_window_hours` (72), `vote_expiry_days` (90), `vote_floor` (3), `confirm_reminder_hours` (3).
 
 ### Votes: rating the people you played with
 

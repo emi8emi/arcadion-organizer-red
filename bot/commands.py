@@ -119,6 +119,12 @@ class DraftGroup(app_commands.Group):
     async def approve(self, interaction: discord.Interaction, name: Optional[str] = None, day: Optional[str] = None):
         await handlers.draft_approve(self.ctx, interaction, name, day)
 
+    @app_commands.command(name="confirm", description="Ask the draft's players to confirm (one message per slot, pings them)")
+    @app_commands.describe(name="Run name (default: the newest run)",
+                           day="The day, like 2026-11-02 (default: the earliest day with a draft)")
+    async def confirm(self, interaction: discord.Interaction, name: Optional[str] = None, day: Optional[str] = None):
+        await handlers.draft_confirm(self.ctx, interaction, name, day)
+
 
 class PartyGroup(app_commands.Group):
     def __init__(self, ctx):
@@ -129,6 +135,11 @@ class PartyGroup(app_commands.Group):
     @app_commands.describe(party_file="The party-N.json you exported and edited")
     async def import_(self, interaction: discord.Interaction, party_file: discord.Attachment):
         await handlers.party_import(self.ctx, interaction, party_file)
+
+    @app_commands.command(name="dashboard", description="Which parties and threads need attention (confirmations, threads)")
+    @app_commands.describe(name="Run name (default: the newest run)", day="The day, like 2026-11-02 (default: first day needing attention)")
+    async def dashboard(self, interaction: discord.Interaction, name: Optional[str] = None, day: Optional[str] = None):
+        await handlers.party_dashboard(self.ctx, interaction, name, day)
 
 
 class VotesGroup(app_commands.Group):

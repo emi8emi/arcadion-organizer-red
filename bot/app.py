@@ -17,6 +17,8 @@ from .snapshots import take_due_snapshots
 from .views import RatePartyButton
 from .parties import auto_end_parties
 from .party_views import PartyEditButton, PartyEndedButton, WhySwappedButton
+from .confirm_views import CancelButton, ConfirmButton
+from .confirmations import send_confirmation_reminders
 from .services import Ctx
 from .lodestone import LodestoneClient
 
@@ -50,7 +52,8 @@ class RaidBot(discord.Client):
             await self.tree.sync()
         if not self.ctx.cfg.get("reminder_channel_id"):
             log.warning("No reminder_channel_id set: the bot will not remind organizers to run /draft export.")
-        self.add_dynamic_items(RatePartyButton, PartyEndedButton, PartyEditButton, WhySwappedButton)           # the thread buttons keep working after a restart
+        self.add_dynamic_items(RatePartyButton, PartyEndedButton, PartyEditButton, WhySwappedButton,
+                               ConfirmButton, CancelButton)           # the thread buttons keep working after a restart
         self.reminder_loop.start()
 
     async def _get_channel(self, channel_id):
@@ -73,6 +76,10 @@ class RaidBot(discord.Client):
             await post_rating_prompts(self.ctx)                                  # slots that just ended
         except Exception:
             log.exception("posting rating prompts failed")
+        try:
+            await send_confirmation_reminders(self.ctx)                          # unconfirmed players, slot starting soon
+        except Exception:
+            log.exception("confirmation reminders failed")
         try:
             await send_due_reminders(self.ctx, self._get_channel)
         except Exception:

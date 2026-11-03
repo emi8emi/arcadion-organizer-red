@@ -171,6 +171,32 @@ CREATE TABLE IF NOT EXISTS draft_notes (
     PRIMARY KEY (run_id, kind, ref)
 );
 
+-- Player confirmations, one row per (slot, player). Keyed by slot and not by party, so they survive the solver
+-- being re-run: a new draft replaces the parties, and everyone still seated in the same slot stays confirmed.
+CREATE TABLE IF NOT EXISTS confirmations (
+    run_id        INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    slot_id       INTEGER NOT NULL REFERENCES slots(id) ON DELETE CASCADE,
+    discord_id    TEXT NOT NULL,
+    status        TEXT NOT NULL CHECK (status IN ('pending', 'confirmed', 'declined')),
+    requested_utc TEXT NOT NULL,
+    answered_utc  TEXT,
+    reason_code   TEXT,                           -- declined: slot, day, role, other
+    reason_text   TEXT,
+    PRIMARY KEY (run_id, slot_id, discord_id)
+);
+
+-- The messages carrying the Confirm / Can't make it buttons: 'draft' in the parties channel (before approval),
+-- 'thread' in the slot's thread (after approval). The bot edits them as answers come in.
+CREATE TABLE IF NOT EXISTS confirm_prompts (
+    slot_id      INTEGER NOT NULL REFERENCES slots(id) ON DELETE CASCADE,
+    kind         TEXT NOT NULL CHECK (kind IN ('draft', 'thread')),
+    channel_id   TEXT NOT NULL,
+    message_id   TEXT NOT NULL,
+    posted_utc   TEXT NOT NULL,
+    reminded_utc TEXT,                            -- thread prompts: when the "starts soon" reminder went out
+    PRIMARY KEY (slot_id, kind)
+);
+
 CREATE INDEX IF NOT EXISTS idx_slots_run ON slots(run_id);
 CREATE INDEX IF NOT EXISTS idx_avail_slot ON availability(slot_id);
 CREATE INDEX IF NOT EXISTS idx_parties_run ON parties(run_id);

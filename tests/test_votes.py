@@ -385,7 +385,7 @@ def test_the_loop_posts_the_rate_buttons_once_when_a_slot_ends(ctx, make_run, cl
     assert [c.item.label for c in msg["view"].children] == ["Rate party 1"]
     assert [c.item.custom_id for c in msg["view"].children] == [f"rate:{pa}"]
     assert run_async(post_rating_prompts(ctx)) == 0                                  # once only
-    assert len(chan.threads[7001].sent) == 1                                         # S2B had no prompt yet
+    assert not [m for m in chan.threads[7001].sent if "Rate your party" in (m["content"] or "")]   # S2B had no prompt yet
     at(clock, "2026-11-03T03:00")
     assert run_async(post_rating_prompts(ctx)) == 1
 

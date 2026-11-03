@@ -12,6 +12,7 @@ from zoneinfo import available_timezones
 import discord
 
 from . import characters as ch
+from . import confirmations as cf
 from . import progscore
 from .fflogs import FFLogsError
 from . import heatmap
@@ -477,6 +478,8 @@ async def draft_import(ctx, interaction, draft_file, name=None, day=None):
         return await say(interaction, f"Draft refused: {e}")
     except DraftConflict:
         return await say(interaction, "That day already has confirmed parties, so a new draft cannot replace them.")
+    if day_key:
+        cf.after_import(ctx.db, run["id"], day_key)         # keep confirmations of people still in the same slot
     lines = [f"Draft stored for **{run['name']}**{', ' + day_label(day_key) if day_key else ''} "
              f"(status: draft, nothing is posted to players): "
              f"{s['parties']} parties in {s['slots']} slots, {s['seated']} players seated, "
@@ -486,6 +489,59 @@ async def draft_import(ctx, interaction, draft_file, name=None, day=None):
     if len(s["slot_notes"]) > 5:
         lines.append(f"… and {len(s['slot_notes']) - 5} more unfilled slots.")
     await say(interaction, "\n".join(lines)[:1990])
+
+
+async def draft_confirm(ctx, interaction, name=None, day=None):
+    """Ask the members of a day's draft parties to confirm: one message per slot in the parties channel."""
+    if not await require_organizer(ctx, interaction):
+        return
+    run = await find_run(ctx, interaction, name)
+    if run is None:
+        return
+    if day:
+        row = await find_day(ctx, interaction, run, day)
+        if row is None:
+            return
+        day_key = row["day"]
+    else:
+        waiting = ctx.db.days_with_draft(run["id"])
+        if not waiting:
+            return await say(interaction, f"**{run['name']}** has no draft to confirm. Import one with /draft import.")
+        day_key = waiting[0]
+    drafts, approved = ctx.db.day_party_counts(run["id"], day_key)
+    if drafts == 0:
+        return await say(interaction, f"{day_label(day_key)} has no draft parties" +
+                         (" (it is already approved: players are asked in the slot threads)." if approved else
+                          ". Import one with /draft import."))
+    channel_id = ctx.db.guild_setting(interaction.guild_id, "parties_channel_id", ctx.cfg.get("parties_channel_id"))
+    channel = await ctx.get_channel(int(channel_id)) if channel_id and ctx.get_channel else None
+    if channel is None:
+        return await say(interaction, "I need the parties channel to ask people (use /settings set).")
+    await interaction.response.defer(ephemeral=True)
+    asked, pinged, errors = await cf.post_draft_prompts(ctx, run, day_key, channel)
+    lines = [f"Asked for confirmation for **{run['name']}**, {day_label(day_key)}: {asked} slot(s), "
+             f"{pinged} player(s) pinged. Follow it with /party dashboard."]
+    if errors:
+        lines.append("Some posts failed (run it again to retry):\n" + "\n".join(f"• {e}" for e in errors[:5]))
+    await say(interaction, "\n".join(lines)[:1990])
+
+
+async def party_dashboard(ctx, interaction, name=None, day=None):
+    """Organizers: the status dashboard (parties and threads that need attention)."""
+    from .dashboard import open_dashboard
+    if not await require_organizer(ctx, interaction):
+        return
+    run = await find_run(ctx, interaction, name)
+    if run is None:
+        return
+    day_key = None
+    if day:
+        row = await find_day(ctx, interaction, run, day)
+        if row is None:
+            return
+        day_key = row["day"]
+    if not await open_dashboard(ctx, interaction, run, day_key):
+        await say(interaction, f"**{run['name']}** has no parties yet. Import a draft with /draft import.")
 
 
 async def draft_approve(ctx, interaction, name=None, day=None):

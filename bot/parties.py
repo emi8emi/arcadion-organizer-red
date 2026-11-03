@@ -202,6 +202,8 @@ async def apply_swap(ctx, guild_id, party_id, out_id, in_id, in_role, actor_id, 
         except Exception:
             log.exception("could not announce the swap")
             problems.append(f"Could not ping <@{in_id}> in the thread.")
+    from . import confirmations
+    problems += [p for p in [await confirmations.thread_prompt(ctx, party["slot_id"], ping=[str(in_id)])] if p]
     channel_id = db.guild_setting(guild_id, "parties_channel_id", ctx.cfg.get("parties_channel_id"))
     channel = await ctx.get_channel(int(channel_id)) if channel_id and ctx.get_channel else None
     if channel is None:

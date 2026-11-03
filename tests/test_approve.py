@@ -9,6 +9,12 @@ S2B = "2026-11-02T20:00"
 PARTIES_CHANNEL = 4242
 
 
+def party_posts(thread):
+    """The party announcements in a thread (the confirmation prompt is a separate message)."""
+    from bot.confirm_views import ConfirmView
+    return [m for m in thread.sent if not isinstance(m.get("view"), ConfirmView)]
+
+
 class FakeMessage:
     def __init__(self, id):
         self.id = id
@@ -81,8 +87,8 @@ def test_approve_confirms_and_posts_one_thread_per_slot_one_message_per_party(ct
     assert {p["status"] for p in ctx.db.parties(run["id"])} == {"confirmed"}
     assert len(chan.threads) == 2
     first = chan.threads[7000]
-    assert first.name == "UWU week 1 · Mon 02 Nov 17:00" and len(first.sent) == 1
-    msg = first.sent[0]
+    assert first.name == "UWU week 1 · Mon 02 Nov 17:00" and len(party_posts(first)) == 1
+    msg = party_posts(first)[0]
     assert msg["allowed_mentions"].users is True and msg["allowed_mentions"].everyone is False
     text = msg["content"]
     assert text.startswith("**Party 1** · <t:") and ":F>" in text and ":R>" in text
@@ -116,7 +122,7 @@ def test_approve_twice_is_refused_once_everything_is_posted(ctx, make_run):
     attach(ctx, chan)
     approve(ctx, None, D2)
     again = approve(ctx, None, D2)
-    assert "already approved" in again.text and len(chan.threads) == 1 and len(chan.threads[7000].sent) == 1
+    assert "already approved" in again.text and len(chan.threads) == 1 and len(party_posts(chan.threads[7000])) == 1
 
 
 def test_without_a_configured_channel_the_day_is_still_confirmed(ctx, make_run):
@@ -149,7 +155,7 @@ def test_a_failed_post_is_retried_by_approving_again_without_duplicates(ctx, mak
     assert {p["status"] for p in ctx.db.parties(run["id"])} == {"confirmed"}
     again = approve(ctx, None, D2)
     assert "posting the parties that are missing" in again.text and "Posted 1 parties" in again.text
-    assert sum(len(t.sent) for t in chan.threads.values()) == 2 and len(chan.threads) == 2
+    assert sum(len(party_posts(t)) for t in chan.threads.values()) == 2 and len(chan.threads) == 2
 
 
 def test_a_party_message_that_failed_is_the_only_one_reposted(ctx, make_run):
@@ -165,7 +171,7 @@ def test_a_party_message_that_failed_is_the_only_one_reposted(ctx, make_run):
     chan.create_thread = flaky
     assert "Some posts failed" in approve(ctx).text
     assert "Posted 1 parties" in approve(ctx, None, D2).text
-    assert len(chan.threads[7000].sent) == 1
+    assert len(party_posts(chan.threads[7000])) == 1
 
 
 def test_default_day_is_the_earliest_with_a_draft(ctx, make_run):

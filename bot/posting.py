@@ -76,6 +76,10 @@ async def post_day_parties(ctx, run, day, channel):
                 continue
             ctx.db.set_party_message(party["id"], msg.id)
             posted += 1
+        from .confirmations import thread_prompt              # ask whoever has not confirmed yet, in the thread
+        err = await thread_prompt(ctx, slot["id"])
+        if err:
+            errors.append(f"{slot['slot_key']}: {err}")
     return posted, errors
 
 
