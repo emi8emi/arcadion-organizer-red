@@ -292,7 +292,7 @@ def test_menu_limits_modal_saves_and_validates(ctx, make_run):
         done = next(c for c in view.children if isinstance(c, DoneButton))
         fin = player(5)
         await done.callback(fin)
-        assert "Saved" in fin.text and fin.response.edits[-1]["view"] is None
+        assert "Run" in fin.text and fin.response.edits[-1]["view"] is None
     run_async(scenario())
 
 

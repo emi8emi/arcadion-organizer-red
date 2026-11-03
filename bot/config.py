@@ -31,6 +31,9 @@ DEFAULTS = {
     "organizer_role_id": None,
     "db_path": "raidbot.sqlite3",
     "export_dir": "exports",
+    "debug_commands": 0,
+    "fflogs_client_id": None,
+    "fflogs_client_secret": None
 }
 
 
@@ -49,4 +52,10 @@ def load_config(path=None, env=None):
         cfg["parties_channel_id"] = int(env["PARTIES_CHANNEL_ID"])
     if env.get("DB_PATH"):
         cfg["db_path"] = env["DB_PATH"]
+    if env.get("FFLOGS_CLIENT_ID"):
+        cfg["fflogs_client_id"] = env["FFLOGS_CLIENT_ID"]
+    if env.get("FFLOGS_CLIENT_SECRET"):
+        cfg["fflogs_client_secret"] = env["FFLOGS_CLIENT_SECRET"]
+    if env.get("DEBUG_COMMANDS"):
+        cfg["debug_commands"] = env["DEBUG_COMMANDS"]
     return cfg
