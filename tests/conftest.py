@@ -1,5 +1,6 @@
 """Shared fixtures: an in-memory bot context, a fixed clock, and fake Discord interactions."""
 import asyncio
+import importlib.util
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -94,6 +95,26 @@ def organizer(**kw):
 
 def player(user_id, name=None, **kw):
     return FakeInteraction(user_id=user_id, name=name or f"Player {user_id}", **kw)
+
+
+def _load_dashboard_migrate():
+    """The dashboard owns the schema and the bot never builds it, so tests borrow the dashboard's migration runner
+    (loaded by path: it is plain standard-library code, and importing `app` would drag in the dashboard's config)."""
+    path = Path(__file__).resolve().parent.parent / "dashboard" / "server" / "app" / "migrate.py"
+    spec = importlib.util.spec_from_file_location("dashboard_migrate", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+dashboard_migrate = _load_dashboard_migrate()
+
+
+@pytest.fixture(autouse=True)
+def dashboard_schema(monkeypatch):
+    """Every DB a test opens (memory or file) gets the dashboard's migrations applied first, like a real start."""
+    import bot.db
+    monkeypatch.setattr(bot.db.DB, "bootstrap", staticmethod(dashboard_migrate.apply_migrations))
 
 
 @pytest.fixture(autouse=True)

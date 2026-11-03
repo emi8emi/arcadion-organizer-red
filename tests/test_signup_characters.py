@@ -1,5 +1,4 @@
 """Characters on signups, against the real db.py and the patched schema (stand-in config only)."""
-import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,28 +40,6 @@ def test_fresh_database_has_the_character_tables_and_no_old_block():
     names = {r[0] for r in db.conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert {"characters", "character_claims", "signup_characters"} <= names
     assert "character_id" in {r[1] for r in db.conn.execute("PRAGMA table_info(day_snapshots)")}
-    db2 = make_db()                       # starting again on the same schema is fine
-    ch.ensure_schema(db2.conn)
-
-
-def test_a_database_from_the_soft_link_version_is_migrated(tmp_path):
-    path = str(tmp_path / "old.db")
-    old = sqlite3.connect(path)
-    old.executescript("""                                              -- the tables as the soft-link version made them
-        CREATE TABLE players (discord_id TEXT PRIMARY KEY, display_name TEXT NOT NULL, roles TEXT NOT NULL DEFAULT '',
-            timezone TEXT NOT NULL DEFAULT 'America/New_York', prog_index INTEGER, updated_utc TEXT);
-        CREATE TABLE characters (discord_id TEXT PRIMARY KEY REFERENCES players(discord_id), name TEXT NOT NULL,
-            world TEXT NOT NULL, lodestone_id TEXT, verified_utc TEXT, token TEXT, token_utc TEXT);
-        CREATE UNIQUE INDEX idx_characters_lodestone ON characters(lodestone_id) WHERE lodestone_id IS NOT NULL;
-        CREATE INDEX idx_characters_name ON characters(lower(name), lower(world));""")
-    old.execute("INSERT INTO players (discord_id, display_name) VALUES ('1', 'A'), ('2', 'B')")
-    old.execute("INSERT INTO characters VALUES ('1', 'Ann Tank', 'Exodus', '111', '2026-10-30T00:00:00+00:00', NULL, NULL)")
-    old.execute("INSERT INTO characters VALUES ('2', 'Bob Soft', 'Exodus', NULL, NULL, 'raidbot-x', NULL)")
-    old.commit(); old.close()
-    db = DB(path)
-    rows = [tuple(r) for r in db.conn.execute("SELECT discord_id, name, lodestone_id FROM characters")]
-    assert rows == [("1", "Ann Tank", "111")]
-    DB(path)                                                           # and a second start is a no-op
 
 
 def test_the_only_character_is_used_without_picking():

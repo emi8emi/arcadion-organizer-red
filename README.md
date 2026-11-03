@@ -24,6 +24,18 @@ the weights live in later steps. See "What is not built yet".
    ```
 
    `.env` and the database are git-ignored. Never paste the token anywhere else.
+
+   **The dashboard owns the database schema, so the bot cannot create it.** The bot refuses to start on a
+   database that has not been migrated far enough. Migrate it first, either by starting the dashboard (it
+   migrates on startup) or by hand (standard library only, nothing to install):
+
+   ```bash
+   cd dashboard/server && python -m app.migrate        # creates or upgrades the file the bot will use
+   ```
+
+   Do this again after pulling a change that adds a file to `dashboard/server/app/migrations/`. Both programs
+   must point at the same file: leave `DB_PATH` unset (default `raidbot.sqlite3` in the repo root, for the bot
+   and the dashboard alike) or give both the same value. A relative path means relative to the repo root.
 4. Optional settings: `config.json` (grid hours, default limits, organizer role id) and `.env`
    (`ORGANIZER_ROLE_ID`, `DB_PATH`). People with **Manage Server** are always organizers.
 
@@ -154,7 +166,7 @@ bot/grid.py        slot grid (America/New_York, DST safe)      bot/solver_io.py 
 bot/db.py          SQLite layer                                 bot/heatmap.py    /run status table
 bot/handlers.py    command logic (no Discord decorators)        bot/views.py      /availability menu and modal
 bot/commands.py    slash command registration                   bot/app.py        client, command sync
-schema.sql         tables (fights come from prog_points/)       tests/            pytest suite
+dashboard/server/app/migrations/   the schema (dashboard-owned)  tests/            pytest suite
 bot/seed.py        fake test players (python -m bot.seed)
 ```
 
@@ -178,11 +190,24 @@ real server members, so posted parties show them as unknown-user mentions. You c
 rating menu takes names from the database), but they cannot rate you or each other. To see `/votes summary`
 (which hides anyone with fewer than 3 votes) you need 3 real voters, or votes added by hand to the `votes` table.
 
+## The database schema (owned by the dashboard)
+
+All tables live in numbered SQL files in `dashboard/server/app/migrations/`, applied in order by
+`dashboard/server/app/migrate.py` and recorded in `schema_migrations` (with a checksum, so an applied file that
+was edited is refused). The bot only checks that the database reaches `REQUIRED_SCHEMA_VERSION` in `bot/db.py`.
+
+To change the schema: add the next `000N_name.sql` (never edit an applied one), keep it additive while the bot
+may be older than the dashboard, and raise `REQUIRED_SCHEMA_VERSION` in the same change that makes the bot use the
+new table or column. Fights and checkpoints are still data the bot syncs from `prog_points/*.json` on start.
+
 ## Tests
 
 ```bash
 uv run pytest
 ```
+
+The suite also covers the dashboard's migration runner (`dashboard/server/tests`). Every test database gets the
+dashboard's migrations applied first, exactly as a real start would find them.
 
 They cover the grid (including both DST-change days), the database layer, the export and fingerprint,
 draft import and its refusals, the heatmap, and every command handler and menu callback using fake

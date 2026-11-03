@@ -20,34 +20,6 @@ from .config import ROOT
 from .db import iso
 from .fflogs_api import FFLogsError
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS prog_scores (
-    character_id   INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
-    encounter      INTEGER NOT NULL,
-    state          TEXT NOT NULL,
-    updated_utc    TEXT NOT NULL,
-    confirmed_idx  INTEGER,          -- highest point ever confirmed; never goes down
-    confirmed_mode TEXT,             -- the scoring mode that confirmed it
-    confirmed_utc  TEXT,             -- when that pull happened
-    latest_idx     INTEGER,          -- highest point of the latest scoring run (can be below confirmed)
-    latest_mode    TEXT,
-    latest_utc     TEXT,             -- when the latest run happened
-    PRIMARY KEY (character_id, encounter)
-);
-"""
-_NEW_COLUMNS = ("confirmed_idx INTEGER", "confirmed_mode TEXT", "confirmed_utc TEXT",
-                "latest_idx INTEGER", "latest_mode TEXT", "latest_utc TEXT")
-
-
-def ensure_schema(conn):
-    conn.executescript(SCHEMA)
-    have = {r[1] for r in conn.execute("PRAGMA table_info(prog_scores)")}
-    for col in _NEW_COLUMNS:                      # tables made by the first version lack these
-        if col.split()[0] not in have:
-            conn.execute(f"ALTER TABLE prog_scores ADD COLUMN {col}")
-    conn.commit()
-
-
 MODES = ("normal", "consistent")
 CLEANUP_TAG = "cleanup"
 

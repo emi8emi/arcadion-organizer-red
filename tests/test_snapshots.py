@@ -1,6 +1,5 @@
 """Day snapshots: a day's signups are frozen at its cutoff, so later profile edits cannot make its draft stale."""
 import json
-import sqlite3
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -9,7 +8,6 @@ from pathlib import Path
 import discord
 
 from bot import handlers
-from bot.db import DB
 from bot.services import snapshot_note
 from bot.snapshots import LATE_WARNING, ensure_snapshot, take_due_snapshots
 from bot.solver_io import build_signups, fingerprint, import_draft
@@ -19,7 +17,6 @@ UTC = timezone.utc
 D2, D3 = "2026-11-02", "2026-11-03"
 S3_ = "2026-11-03T17:00"
 CUTOFF2 = datetime(2026, 11, 2, 4, 59, tzinfo=UTC)        # Monday closes Sunday 23:59 EST
-OLD = Path(__file__).resolve().parent / "fixtures" / "schema_before_snapshots.sql"
 SOLVER_DIR = Path(__file__).resolve().parent.parent.parent / "raid-solver"
 
 
@@ -290,36 +287,6 @@ def test_note_and_menu_strings_stay_within_discords_limits(ctx, make_run, clock)
     run_async(scenario())
     text = do(ctx, handlers.myschedule, player(5)).text
     assert len(text) <= 2000
-
-
-# ---------------------------------------------------------------- migration from the first commit's schema
-
-def test_migration_adds_the_snapshot_columns_and_keeps_the_data(tmp_path, cfg):
-    path = str(tmp_path / "old.sqlite3")
-    conn = sqlite3.connect(path)
-    conn.executescript(OLD.read_text())            # schema exactly as the first commit had it
-    conn.execute("INSERT INTO runs (guild_id, name, fight_id, start_date, end_date, signup_deadline_utc, status, "
-                 "created_by, created_utc) VALUES ('1', 'Old', 1, '2026-11-02', '2026-11-02', "
-                 "'2026-11-01T04:59:00+00:00', 'open', '1', '2026-10-25T12:00:00+00:00')")
-    conn.execute("INSERT INTO run_days (run_id, day, cutoff_utc, exported_utc) "
-                 "VALUES (1, '2026-11-02', '2026-11-02T04:59:00+00:00', '2026-11-02T05:10:00+00:00')")
-    conn.execute("INSERT INTO slots (run_id, slot_key, start_utc, minutes) VALUES (1, '2026-11-02T17:00', "
-                 "'2026-11-02T22:00:00+00:00', 90)")
-    conn.execute("INSERT INTO players (discord_id, display_name, roles, prog_index) VALUES ('7', 'Ann', 'dps', 3)")
-    conn.execute("INSERT INTO availability (run_id, discord_id, slot_id) VALUES (1, '7', 1)")
-    conn.commit()
-    assert "snapshot_utc" not in {r[1] for r in conn.execute("PRAGMA table_info(run_days)")}
-    conn.close()
-
-    db = DB(path)
-    cols = {r["name"] for r in db.conn.execute("PRAGMA table_info(run_days)")}
-    assert {"snapshot_utc", "snapshot_late"} <= cols
-    day = db.run_day(1, "2026-11-02")
-    assert day["exported_utc"] == "2026-11-02T05:10:00+00:00" and day["snapshot_utc"] is None
-    assert db.snapshot_candidates(datetime(2026, 11, 3, tzinfo=UTC)) == []        # exported earlier: left live
-    DB(path).close()                                                              # a second start changes nothing
-    assert db.take_snapshot(1, "2026-11-02", cfg, datetime(2026, 11, 3, tzinfo=UTC))
-    assert db.snapshot_rows(1, "2026-11-02")["7"]["prog_index"] == 3
 
 
 # ---------------------------------------------------------------- the real solver

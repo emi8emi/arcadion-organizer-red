@@ -1,5 +1,4 @@
 """Characters: claim + Lodestone verification (fake Lodestone), alts, takeover, FFLogs sync, migration, parsers."""
-import sqlite3
 from datetime import timedelta
 
 import pytest
@@ -236,22 +235,6 @@ def test_parse_identity_follows_canonical_ids():
 
 
 # ---------------------------------------------------------------- migration from the soft-link version
-
-def test_migration_keeps_verified_rows_and_drops_soft_links():
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    conn.executescript("""
-        CREATE TABLE players (discord_id TEXT PRIMARY KEY, display_name TEXT);
-        CREATE TABLE characters (discord_id TEXT PRIMARY KEY, name TEXT NOT NULL, world TEXT NOT NULL,
-            lodestone_id TEXT, verified_utc TEXT, token TEXT, token_utc TEXT);
-        CREATE UNIQUE INDEX idx_characters_lodestone ON characters(lodestone_id) WHERE lodestone_id IS NOT NULL;
-        CREATE INDEX idx_characters_name ON characters(lower(name), lower(world));
-        INSERT INTO characters VALUES ('1', 'Ann Tank', 'Exodus', '111', '2026-10-30T00:00:00+00:00', NULL, NULL);
-        INSERT INTO characters VALUES ('2', 'Bob Soft', 'Exodus', NULL, NULL, 'raidbot-x', NULL);""")
-    ch.ensure_schema(conn)
-    ch.ensure_schema(conn)                                          # idempotent
-    rows = conn.execute("SELECT discord_id, name, lodestone_id FROM characters").fetchall()
-    assert [tuple(r) for r in rows] == [("1", "Ann Tank", "111")]
 
 
 # ---------------------------------------------------------------- Lodestone page parsing

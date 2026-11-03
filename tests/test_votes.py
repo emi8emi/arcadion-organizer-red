@@ -1,6 +1,5 @@
 """Ratings: eligibility, latest-wins, the solver export, privacy of the summary, the private rating UI."""
 import json
-import sqlite3
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -9,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from bot import handlers
-from bot.db import DB
 from bot.posting import post_rating_prompts
 from bot.snapshots import take_due_snapshots
 from bot.solver_io import build_signups, fingerprint, import_draft
@@ -21,7 +19,6 @@ from test_approve import FakeParties, attach
 UTC = timezone.utc
 D2, D3 = "2026-11-02", "2026-11-03"
 S2B = "2026-11-02T20:00"
-OLD = Path(__file__).resolve().parent / "fixtures" / "schema_before_votes.sql"
 SOLVER_DIR = Path(__file__).resolve().parent.parent.parent / "raid-solver"
 # S2 = Mon 17:00 EST = 22:00Z, 90 minutes: it ends 23:30Z. S2B ends 02:30Z the next day.
 ENDED = "2026-11-02T23:31"
@@ -456,38 +453,3 @@ def test_rating_strings_and_components_respect_discords_limits(ctx, make_run, cl
         listing = RateListView(ctx, parties)
         assert len(listing.children) == 20 and all(len(c.label) <= 80 for c in listing.children)
     run_async(scenario())
-
-
-# ---------------------------------------------------------------- migration from the previous schema
-
-def test_migration_from_the_previous_schema_adds_votes_and_the_thread_columns(tmp_path):
-    path = str(tmp_path / "old.sqlite3")
-    conn = sqlite3.connect(path)
-    conn.executescript(OLD.read_text())                  # schema exactly as the second commit had it
-    conn.execute("INSERT INTO runs (guild_id, name, fight_id, start_date, end_date, signup_deadline_utc, status, "
-                 "created_by, created_utc) VALUES ('1', 'Old', 1, '2026-11-02', '2026-11-02', "
-                 "'2026-11-01T04:59:00+00:00', 'open', '1', '2026-10-25T12:00:00+00:00')")
-    conn.execute("INSERT INTO slots (run_id, slot_key, start_utc, minutes) VALUES (1, '2026-11-02T17:00', "
-                 "'2026-11-02T22:00:00+00:00', 90)")
-    conn.execute("INSERT INTO parties (run_id, slot_id, party_index, status, target_idx) VALUES (1, 1, 0, 'confirmed', 0)")
-    conn.commit()
-    names = lambda t: {r[1] for r in conn.execute(f"PRAGMA table_info({t})")}       # noqa: E731
-    assert "thread_id" not in names("slots") and "message_id" not in names("parties")
-    assert "answer" in names("votes") and "vote" not in names("votes")           # the old, unused yes/no table
-    conn.execute("INSERT INTO votes (slot_id, voter_id, target_id, answer, created_utc) "
-                 "VALUES (1, '5', '6', 'yes', '2026-11-03T00:00:00+00:00'), (1, '6', '5', 'no', '2026-11-03T00:00:00+00:00')")
-    conn.commit()
-    conn.close()
-
-    db = DB(path)
-    cols = lambda t: {r["name"] for r in db.conn.execute(f"PRAGMA table_info({t})")}    # noqa: E731
-    assert {"thread_id", "rating_posted_utc"} <= cols("slots") and "message_id" in cols("parties")
-    assert {"voter_id", "target_id", "vote", "created_utc"} <= cols("votes")
-    assert db.party(1)["status"] == "confirmed" and db.slots_awaiting_rating() == []
-    assert [(r["voter_id"], r["target_id"], r["vote"], r["run_id"]) for r in db.conn.execute("SELECT * FROM votes ORDER BY id")] == [
-        ("5", "6", "like", 1), ("6", "5", "dislike", 1)]                      # old rows were converted, not lost
-    assert not db.conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'votes_old'").fetchone()
-    db.add_vote(1, 1, 5, 6, "like", datetime(2026, 11, 3, tzinfo=UTC))
-    with pytest.raises(sqlite3.IntegrityError):
-        db.add_vote(1, 1, 5, 6, "love", datetime(2026, 11, 3, tzinfo=UTC))
-    DB(path).close()                                      # starting again changes nothing

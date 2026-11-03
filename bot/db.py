@@ -1,6 +1,9 @@
 """SQLite access. Plain sqlite3 (synchronous): fine for a 20-60 person community bot.
 
 Every method that changes data commits before returning. Times are UTC ISO strings.
+
+The bot does not own the schema: the dashboard does (dashboard/server/app/migrations/). Opening a `DB`
+only checks that the database has been migrated far enough, and refuses to start otherwise.
 """
 import json
 import sqlite3
@@ -9,11 +12,29 @@ from pathlib import Path
 
 from .config import ROLES
 
-SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schema.sql"
 PROG_POINTS_DIR = Path(__file__).resolve().parent.parent / "prog_points"
+
+# The newest dashboard migration this code depends on. Raise it in the same change that starts using a
+# new table or column; a database that is further along is fine (migrations only add things).
+REQUIRED_SCHEMA_VERSION = 1
 
 
 GUILD_SETTING_KEYS = ("organizer_role_id", "reminder_channel_id", "parties_channel_id")
+
+
+class SchemaNotReady(RuntimeError):
+    """The database has not been migrated to the version this bot needs."""
+
+
+def check_schema(conn, where="the database"):
+    have = 0
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").fetchone():
+        have = conn.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()[0]
+    if have < REQUIRED_SCHEMA_VERSION:
+        raise SchemaNotReady(
+            f"{where} is at schema version {have} but this bot needs {REQUIRED_SCHEMA_VERSION}. The dashboard owns "
+            f"the schema: start the dashboard (it migrates on startup), or run `python -m app.migrate` in "
+            f"dashboard/server, then start the bot again.")
 
 
 class DuplicateRun(Exception):
@@ -47,68 +68,22 @@ def _member_dict(m):
 
 
 class DB:
+    bootstrap = None                 # tests set a function here that builds the schema; the bot itself never does
+
     def __init__(self, path=":memory:", prog_dir=None):
-        self.conn = sqlite3.connect(path, check_same_thread=False)
+        self.conn = sqlite3.connect(path, check_same_thread=False, timeout=10)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
-        self._park_old_votes()
-        self.conn.executescript(SCHEMA_PATH.read_text())
-        self._migrate()
-        self.conn.commit()
+        self.conn.execute("PRAGMA busy_timeout = 10000")        # the dashboard writes to this file too
+        try:
+            if type(self).bootstrap:
+                type(self).bootstrap(self.conn)
+            check_schema(self.conn, path)
+        except Exception:
+            self.conn.close()
+            raise
         from .progscore import sync_fights               # fights + checkpoints come from the prog point files
         sync_fights(self, prog_dir or PROG_POINTS_DIR)
-
-    def _park_old_votes(self):
-        """Early skeletons had an unused `votes` table (yes/neutral/no, one row per slot and pair).
-        Move it aside so schema.sql can create the append-only table; _migrate copies any rows across."""
-        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(votes)")}
-        if cols and "vote" not in cols:
-            with self.conn:
-                self.conn.execute("ALTER TABLE votes RENAME TO votes_old")
-
-    def _migrate(self):
-        """Bring a database made before per-day cutoffs up to date. Safe to run on every start.
-
-        Runs without run_days rows get one row per day (taken from their slots) using the run's old
-        signup_deadline_utc as every day's cutoff. A day that already has parties in the database counts
-        as exported, so old runs do not trigger export reminders.
-        """
-        if self.conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'votes_old'").fetchone():
-            with self.conn:                               # yes -> like, no -> dislike
-                self.conn.execute(
-                    """INSERT INTO votes (id, run_id, slot_id, voter_id, target_id, vote, created_utc)
-                       SELECT o.id, s.run_id, o.slot_id, o.voter_id, o.target_id,
-                              CASE o.answer WHEN 'yes' THEN 'like' WHEN 'no' THEN 'dislike' ELSE 'neutral' END,
-                              o.created_utc FROM votes_old o JOIN slots s ON s.id = o.slot_id""")
-                self.conn.execute("DROP TABLE votes_old")
-        from .characters import ensure_schema          # characters tables, and the move off the soft-link version
-        ensure_schema(self.conn)
-        from .progscore import ensure_schema as ensure_prog_schema
-        ensure_prog_schema(self.conn)
-        with self.conn:
-            self.conn.execute(
-                """CREATE TABLE IF NOT EXISTS guild_settings (
-                       guild_id TEXT PRIMARY KEY, organizer_role_id TEXT,
-                       reminder_channel_id TEXT, parties_channel_id TEXT)""")
-            for table, col, ddl in (("run_days", "snapshot_utc", "TEXT"),
-                                    ("run_days", "snapshot_late", "INTEGER NOT NULL DEFAULT 0"),
-                                    ("day_snapshots", "character_id", "INTEGER REFERENCES characters(id) ON DELETE SET NULL"),
-                                    ("slots", "thread_id", "TEXT"), ("slots", "rating_posted_utc", "TEXT"),
-                                    ("parties", "message_id", "TEXT"), ("parties", "ended_utc", "TEXT"),
-                                    ("parties", "ended_by", "TEXT"), ("parties", "rating_posted_utc", "TEXT")):
-                cols = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
-                if col not in cols:                       # database made before this column existed
-                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
-            self.conn.execute(
-                """INSERT OR IGNORE INTO run_days (run_id, day, cutoff_utc, exported_utc)
-                   SELECT r.id, substr(s.slot_key, 1, 10), r.signup_deadline_utc,
-                          CASE WHEN EXISTS (SELECT 1 FROM parties p JOIN slots ps ON ps.id = p.slot_id
-                                            WHERE p.run_id = r.id
-                                              AND substr(ps.slot_key, 1, 10) = substr(s.slot_key, 1, 10))
-                               THEN r.created_utc END
-                   FROM runs r JOIN slots s ON s.run_id = r.id
-                   WHERE r.id NOT IN (SELECT run_id FROM run_days)
-                   GROUP BY r.id, substr(s.slot_key, 1, 10)""")
 
     def close(self):
         self.conn.close()

@@ -1,7 +1,10 @@
--- Raid matchmaking bot: SQLite schema (V1 skeleton).
+-- Baseline of the shared raid database: everything the bot had in schema.sql, bot/characters.py,
+-- bot/progscore.py and bot/db.py's _migrate at the player-confirmation branch.
+-- The dashboard owns this schema (see app/migrate.py); the bot only checks that it is up to date.
 -- All timestamps are UTC ISO-8601 strings. Slot keys ("2026-11-02T17:00") are the
 -- grid's local wall-clock time and double as the solver's slot ids.
--- Safe to run repeatedly: every statement is IF NOT EXISTS / INSERT OR IGNORE.
+-- Every statement is IF NOT EXISTS, so applying this to a database the bot already built just stamps it.
+-- Never edit this file once it has been applied anywhere: add 0002_*.sql instead (edits are refused by checksum).
 
 CREATE TABLE IF NOT EXISTS fights (
     id          INTEGER PRIMARY KEY,
@@ -62,6 +65,7 @@ CREATE TABLE IF NOT EXISTS day_snapshots (
     drop_checkpoints  INTEGER NOT NULL,
     taken_utc         TEXT NOT NULL,
     late              INTEGER NOT NULL DEFAULT 0,
+    character_id      INTEGER REFERENCES characters(id) ON DELETE SET NULL,   -- the character brought that day
     PRIMARY KEY (run_id, day, discord_id)
 );
 
@@ -72,6 +76,8 @@ CREATE TABLE IF NOT EXISTS slots (
     start_utc       TEXT NOT NULL,
     minutes         INTEGER NOT NULL DEFAULT 90, -- scheduled length
     actual_minutes  INTEGER,                     -- filled in when a slot ends early
+    thread_id       TEXT,                        -- Discord thread the approved parties were posted in
+    rating_posted_utc TEXT,                      -- when the "Rate your party" buttons went into that thread
     UNIQUE (run_id, slot_key)
 );
 
@@ -82,6 +88,35 @@ CREATE TABLE IF NOT EXISTS players (
     timezone      TEXT NOT NULL DEFAULT 'America/New_York',
     prog_index    INTEGER,                       -- checkpoint idx in the current fight; NULL = not set yet
     updated_utc   TEXT
+);
+
+-- Characters: verified-only links between a Discord player and FFXIV characters (alts allowed).
+CREATE TABLE IF NOT EXISTS characters (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    discord_id   TEXT NOT NULL REFERENCES players(discord_id),
+    lodestone_id TEXT NOT NULL UNIQUE,
+    name         TEXT NOT NULL,
+    world        TEXT NOT NULL,
+    fflogs_id    INTEGER,
+    verified_utc TEXT NOT NULL,
+    synced_utc   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_characters_owner ON characters(discord_id);
+-- Which character a player brings on a given day of a run. No row = their only character, if they have one.
+CREATE TABLE IF NOT EXISTS signup_characters (
+    run_id       INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    day          TEXT NOT NULL,
+    discord_id   TEXT NOT NULL REFERENCES players(discord_id),
+    character_id INTEGER REFERENCES characters(id) ON DELETE SET NULL,
+    PRIMARY KEY (run_id, day, discord_id)
+);
+CREATE TABLE IF NOT EXISTS character_claims (
+    discord_id   TEXT PRIMARY KEY REFERENCES players(discord_id),
+    name         TEXT NOT NULL,
+    world        TEXT NOT NULL,
+    token        TEXT NOT NULL,
+    token_utc    TEXT NOT NULL,
+    last_try_utc TEXT
 );
 
 CREATE TABLE IF NOT EXISTS availability (
@@ -126,6 +161,10 @@ CREATE TABLE IF NOT EXISTS parties (
     party_index   INTEGER NOT NULL,
     status        TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'confirmed', 'done')),
     target_idx    INTEGER,                        -- checkpoint the party is built around
+    message_id    TEXT,                           -- the Discord message that announced the party
+    ended_utc     TEXT,                           -- when the party was marked ended (button or automatically)
+    ended_by      TEXT,                           -- discord id of whoever pressed it, or 'auto'
+    rating_posted_utc TEXT,                       -- when this party's "Rate" button went into the thread
     UNIQUE (run_id, slot_id, party_index)
 );
 
@@ -146,17 +185,6 @@ CREATE TABLE IF NOT EXISTS standby (
     PRIMARY KEY (slot_id, discord_id)
 );
 
--- Private "run with them again?" answers. Admins read aggregates only.
-CREATE TABLE IF NOT EXISTS votes (
-    id           INTEGER PRIMARY KEY,
-    slot_id      INTEGER NOT NULL REFERENCES slots(id) ON DELETE CASCADE,
-    voter_id     TEXT NOT NULL,
-    target_id    TEXT NOT NULL,
-    answer       TEXT NOT NULL CHECK (answer IN ('yes', 'neutral', 'no')),
-    created_utc  TEXT NOT NULL,
-    UNIQUE (slot_id, voter_id, target_id)
-);
-
 -- Minutes actually played, for burnout tracking.
 CREATE TABLE IF NOT EXISTS play_log (
     slot_id     INTEGER NOT NULL REFERENCES slots(id) ON DELETE CASCADE,
@@ -174,30 +202,101 @@ CREATE TABLE IF NOT EXISTS draft_notes (
     PRIMARY KEY (run_id, kind, ref)
 );
 
+-- Player confirmations, one row per (slot, player). Keyed by slot and not by party, so they survive the solver
+-- being re-run: a new draft replaces the parties, and everyone still seated in the same slot stays confirmed.
+CREATE TABLE IF NOT EXISTS confirmations (
+    run_id        INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    slot_id       INTEGER NOT NULL REFERENCES slots(id) ON DELETE CASCADE,
+    discord_id    TEXT NOT NULL,
+    status        TEXT NOT NULL CHECK (status IN ('pending', 'confirmed', 'declined')),
+    requested_utc TEXT NOT NULL,
+    answered_utc  TEXT,
+    reason_code   TEXT,                           -- declined: slot, day, role, other
+    reason_text   TEXT,
+    PRIMARY KEY (run_id, slot_id, discord_id)
+);
+
+-- The messages carrying the Confirm / Can't make it buttons: 'draft' in the parties channel (before approval),
+-- 'thread' in the slot's thread (after approval). The bot edits them as answers come in.
+CREATE TABLE IF NOT EXISTS confirm_prompts (
+    slot_id      INTEGER NOT NULL REFERENCES slots(id) ON DELETE CASCADE,
+    kind         TEXT NOT NULL CHECK (kind IN ('draft', 'thread')),
+    channel_id   TEXT NOT NULL,
+    message_id   TEXT NOT NULL,
+    posted_utc   TEXT NOT NULL,
+    reminded_utc TEXT,                            -- thread prompts: when the "starts soon" reminder went out
+    PRIMARY KEY (slot_id, kind)
+);
+
 CREATE INDEX IF NOT EXISTS idx_slots_run ON slots(run_id);
 CREATE INDEX IF NOT EXISTS idx_avail_slot ON availability(slot_id);
 CREATE INDEX IF NOT EXISTS idx_parties_run ON parties(run_id);
 
--- Seed: Ultima Weapon (Ultimate), 19 positions (0 = P1 fresh ... 18 = P4 enrage).
-INSERT OR IGNORE INTO fights (id, name, short_name) VALUES (1, 'Ultima Weapon (Ultimate)', 'UWU');
+-- Fights and their checkpoints are not seeded here: the bot creates them from prog_points/*.json on start
+-- (see bot/progscore.py sync_fights).
 
-INSERT OR IGNORE INTO checkpoints (fight_id, idx, phase, name) VALUES
-    (1,  0, 'P1', 'Fresh'),
-    (1,  1, 'P1', 'Plumes'),
-    (1,  2, 'P1', 'Cleanse'),
-    (1,  3, 'P1', 'Twins bait'),
-    (1,  4, 'P1', 'Enrage'),
-    (1,  5, 'P2', 'Fresh'),
-    (1,  6, 'P2', 'Nails'),
-    (1,  7, 'P2', 'Nails cleanup'),
-    (1,  8, 'P2', 'Enrage'),
-    (1,  9, 'P3', 'Fresh'),
-    (1, 10, 'P3', 'Gaols'),
-    (1, 11, 'P3', 'Gaols cleanup'),
-    (1, 12, 'P3', 'Mario kart'),
-    (1, 13, 'P3', 'Enrage'),
-    (1, 14, 'Intermission', 'Intermission'),
-    (1, 15, 'P4', 'Predation'),
-    (1, 16, 'P4', 'Annihilation'),
-    (1, 17, 'P4', 'Suppression'),
-    (1, 18, 'P4', 'Enrage');
+-- Ratings between players who shared a confirmed party. Append-only: the latest row per (voter, target)
+-- is the current vote, and 'neutral' is stored so a changed mind clears an earlier like or dislike.
+-- Never shown to players; organizers only see aggregates (/votes summary).
+CREATE TABLE IF NOT EXISTS votes (
+    id           INTEGER PRIMARY KEY,
+    run_id       INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    slot_id      INTEGER NOT NULL REFERENCES slots(id) ON DELETE CASCADE,
+    voter_id     TEXT NOT NULL,
+    target_id    TEXT NOT NULL,
+    vote         TEXT NOT NULL CHECK (vote IN ('like', 'neutral', 'dislike')),
+    created_utc  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS votes_pair ON votes (voter_id, target_id, created_utc);
+
+-- The parties exactly as the solver made them, frozen when /draft approve confirms them. Never edited, so
+-- manual changes can be compared against it later (party_changes holds the changes).
+CREATE TABLE IF NOT EXISTS party_originals (
+    party_id     INTEGER PRIMARY KEY REFERENCES parties(id) ON DELETE CASCADE,
+    run_id       INTEGER NOT NULL,
+    slot_id      INTEGER NOT NULL,
+    taken_utc    TEXT NOT NULL,
+    target_idx   INTEGER,
+    members_json TEXT NOT NULL                    -- [{discord_id, role, is_helper, placed_down, distance}]
+);
+
+-- Everything done to a party after approval: swaps, ended / undone / overridden. Append-only.
+-- reason_code: no_show, cant_make_it, wrong_role, prog_mismatch, other.
+CREATE TABLE IF NOT EXISTS party_changes (
+    id               INTEGER PRIMARY KEY,
+    party_id         INTEGER NOT NULL REFERENCES parties(id) ON DELETE CASCADE,
+    run_id           INTEGER NOT NULL,
+    slot_id          INTEGER NOT NULL,
+    at_utc           TEXT NOT NULL,
+    actor_id         TEXT NOT NULL,
+    kind             TEXT NOT NULL CHECK (kind IN ('swap', 'role', 'ended', 'end_override', 'end_undo')),
+    player_id        TEXT,                        -- swap: the player taken out
+    other_player_id  TEXT,                        -- swap: the player put in
+    reason_code      TEXT,
+    reason_text      TEXT,
+    warnings_json    TEXT,                        -- overridden validation warnings
+    detail_json      TEXT                         -- roles involved, source of the edit ('panel' or 'import')
+);
+
+-- Per-character prog scorer state (FFLogs pulls), one row per character and encounter.
+CREATE TABLE IF NOT EXISTS prog_scores (
+    character_id   INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    encounter      INTEGER NOT NULL,
+    state          TEXT NOT NULL,
+    updated_utc    TEXT NOT NULL,
+    confirmed_idx  INTEGER,          -- highest point ever confirmed; never goes down
+    confirmed_mode TEXT,             -- the scoring mode that confirmed it
+    confirmed_utc  TEXT,             -- when that pull happened
+    latest_idx     INTEGER,          -- highest point of the latest scoring run (can be below confirmed)
+    latest_mode    TEXT,
+    latest_utc     TEXT,             -- when the latest run happened
+    PRIMARY KEY (character_id, encounter)
+);
+
+-- Per-server settings set with /settings; an unset value falls back to the .env / config.json default.
+CREATE TABLE IF NOT EXISTS guild_settings (
+    guild_id            TEXT PRIMARY KEY,
+    organizer_role_id   TEXT,
+    reminder_channel_id TEXT,
+    parties_channel_id  TEXT
+);
