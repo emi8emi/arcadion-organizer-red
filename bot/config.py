@@ -29,7 +29,7 @@ DEFAULTS = {
     "confirm_reminder_hours": 3,     # unconfirmed players in an approved party are pinged again this long before the slot
     "prog_fetch_hours": 48,          # /debug score reads FFLogs reports from this many hours back (0 = no limit)
     "organizer_role_id": None,
-    "db_path": "raidbot.sqlite3",
+    "database_url": None,            # the Postgres database shared with the dashboard; set DATABASE_URL in .env
     "export_dir": "exports",
     "debug_commands": 0,
     "fflogs_client_id": None,
@@ -38,7 +38,7 @@ DEFAULTS = {
 
 
 def load_config(path=None, env=None):
-    """Defaults, then config.json, then environment overrides (ORGANIZER_ROLE_ID, REMINDER_CHANNEL_ID, PARTIES_CHANNEL_ID, DB_PATH)."""
+    """Defaults, then config.json, then environment overrides (ORGANIZER_ROLE_ID, REMINDER_CHANNEL_ID, PARTIES_CHANNEL_ID, DATABASE_URL)."""
     env = os.environ if env is None else env
     cfg = dict(DEFAULTS)
     path = Path(path) if path else ROOT / "config.json"
@@ -50,8 +50,8 @@ def load_config(path=None, env=None):
         cfg["reminder_channel_id"] = int(env["REMINDER_CHANNEL_ID"])
     if env.get("PARTIES_CHANNEL_ID"):
         cfg["parties_channel_id"] = int(env["PARTIES_CHANNEL_ID"])
-    if env.get("DB_PATH"):
-        cfg["db_path"] = env["DB_PATH"]
+    if env.get("DATABASE_URL"):
+        cfg["database_url"] = env["DATABASE_URL"]
     if env.get("FFLOGS_CLIENT_ID"):
         cfg["fflogs_client_id"] = env["FFLOGS_CLIENT_ID"]
     if env.get("FFLOGS_CLIENT_SECRET"):

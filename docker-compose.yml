@@ -1,0 +1,19 @@
+# A local PostgreSQL for development and for the tests:  docker compose up -d
+# Creates the databases `raidbot` (for the bot and dashboard) and `raidtest` (for pytest). Local use only: the
+# password is public. For a real server use your own credentials and sslmode=require.
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: raidtest
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - raid-pgdata:/var/lib/postgresql/data
+      - ./docker/init-databases.sql:/docker-entrypoint-initdb.d/init-databases.sql:ro
+
+volumes:
+  raid-pgdata:

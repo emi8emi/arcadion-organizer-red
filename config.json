@@ -23,6 +23,5 @@
   "vote_floor": 3,
 
   "organizer_role_id": null,
-  "db_path": "raidbot.sqlite3",
   "export_dir": "exports"
 }

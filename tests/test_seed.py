@@ -111,7 +111,6 @@ def test_remove_deletes_fakes_everywhere_and_keeps_real_players(ctx, solo):
     left = [r["discord_id"] for r in ctx.db.conn.execute("SELECT discord_id FROM players")]
     assert left == ["42"] and ctx.db.ticked_keys(solo["id"], 42) == [SLOT]
     assert seed.remove(ctx.db) == {}                                  # nothing left to remove
-    assert ctx.db.conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
 
 def test_is_fake_never_matches_real_looking_ids():
@@ -153,24 +152,24 @@ def test_the_real_solver_builds_a_party_from_the_fakes_and_one_real_player(ctx, 
     assert summary["parties"] == 1 and summary["seated"] == 8
 
 
-def test_cli_seeds_and_removes_in_a_real_database_file(tmp_path, capsys, monkeypatch):
-    """The command line path, against a file database (the one the bot would use)."""
+def test_cli_seeds_and_removes_in_a_real_database(db_url, capsys):
+    """The command line path, against its own connection to the database (the way the bot would use it)."""
     from bot.db import DB
     from bot.grid import GridConfig, run_slots
     from bot.config import load_config
     cfg = load_config(env={})
-    path = str(tmp_path / "cli.sqlite3")
+    path = db_url
     db = DB(path)
     slots = run_slots(datetime(2026, 11, 2).date(), datetime(2026, 11, 2).date(), GridConfig.from_config(cfg), "17:00", "17:00")
     db.create_run(guild_id=1, name="cli", fight_id=1, start_date=datetime(2026, 11, 2).date(),
                   end_date=datetime(2026, 11, 2).date(),
                   cutoffs={"2026-11-02": datetime(2030, 1, 1, tzinfo=timezone.utc)}, slots=slots, created_by=1, now=NOW)
     db.close()
-    assert seed.main(["--run", "cli", "--db", path]) == 0
+    assert seed.main(["--run", "cli", "--database-url", path]) == 0
     out = capsys.readouterr().out
     assert "Seeded 7 fake players" in out and "pick dps" in out
-    assert seed.main(["--run", "missing", "--db", path]) == 1
+    assert seed.main(["--run", "missing", "--database-url", path]) == 1
     assert "No run called" in capsys.readouterr().err
-    assert seed.main(["--remove", "--db", path]) == 0
+    assert seed.main(["--remove", "--database-url", path]) == 0
     assert "Removed fake players" in capsys.readouterr().out
-    assert seed.main(["--db", path]) == 1                              # needs --run or --remove
+    assert seed.main(["--database-url", path]) == 1                              # needs --run or --remove

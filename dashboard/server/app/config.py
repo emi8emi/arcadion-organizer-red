@@ -3,8 +3,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from .migrate import resolve_db_path  # noqa: E402  (after load_dotenv, so DB_PATH from .env is seen)
-
 
 def _required(name: str) -> str:
     value = os.environ.get(name)
@@ -23,7 +21,6 @@ SESSION_SECRET = _required("SESSION_SECRET")
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:5173").rstrip("/")
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "false").lower() == "true"
 
-# The one database file the bot and the dashboard share. A relative path is relative to the repo root,
-# which is where the bot runs from, so leaving DB_PATH out (or giving the same value to both) means the
-# same file. The dashboard owns its schema: see migrate.py and migrations/.
-DB_PATH = resolve_db_path(os.environ.get("DB_PATH"))
+# The PostgreSQL database the bot and the dashboard share; give both the same URL. The dashboard owns its
+# schema and migrates it on startup: see migrate.py and migrations/.
+DATABASE_URL = _required("DATABASE_URL")

@@ -1,16 +1,19 @@
-"""SQLite access. Plain sqlite3 (synchronous): fine for a 20-60 person community bot.
+"""Database access. Plain synchronous psycopg: fine for a 20-60 person community bot.
 
 Every method that changes data commits before returning. Times are UTC ISO strings.
 
+The database is PostgreSQL, reached through bot/pg.py (queries are written with `?` placeholders there).
 The bot does not own the schema: the dashboard does (dashboard/server/app/migrations/). Opening a `DB`
 only checks that the database has been migrated far enough, and refuses to start otherwise.
 """
 import json
-import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+import psycopg.errors
+
 from .config import ROLES
+from .pg import Conn
 
 PROG_POINTS_DIR = Path(__file__).resolve().parent.parent / "prog_points"
 
@@ -28,7 +31,7 @@ class SchemaNotReady(RuntimeError):
 
 def check_schema(conn, where="the database"):
     have = 0
-    if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").fetchone():
+    if conn.execute("SELECT to_regclass('schema_migrations')").fetchone()[0] is not None:
         have = conn.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()[0]
     if have < REQUIRED_SCHEMA_VERSION:
         raise SchemaNotReady(
@@ -68,17 +71,10 @@ def _member_dict(m):
 
 
 class DB:
-    bootstrap = None                 # tests set a function here that builds the schema; the bot itself never does
-
-    def __init__(self, path=":memory:", prog_dir=None):
-        self.conn = sqlite3.connect(path, check_same_thread=False, timeout=10)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA foreign_keys = ON")
-        self.conn.execute("PRAGMA busy_timeout = 10000")        # the dashboard writes to this file too
+    def __init__(self, url, prog_dir=None):
+        self.conn = Conn(url)
         try:
-            if type(self).bootstrap:
-                type(self).bootstrap(self.conn)
-            check_schema(self.conn, path)
+            check_schema(self.conn, "the database")
         except Exception:
             self.conn.close()
             raise
@@ -119,21 +115,20 @@ class DB:
         legacy_deadline = max(cutoffs.values())            # only kept so old code and old databases still make sense
         try:
             with self.conn:
-                cur = self.conn.execute(
+                run_id = self.conn.execute(
                     """INSERT INTO runs (guild_id, name, fight_id, start_date, end_date, earliest_start,
                                          latest_start, signup_deadline_utc, status, created_by, created_utc)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?) RETURNING id""",
                     (str(guild_id), name, fight_id, str(start_date), str(end_date), earliest, latest,
-                     iso(legacy_deadline), str(created_by), iso(now)))
-                run_id = cur.lastrowid
+                     iso(legacy_deadline), str(created_by), iso(now))).fetchone()["id"]
                 self.conn.executemany(
                     "INSERT INTO slots (run_id, slot_key, start_utc, minutes) VALUES (?, ?, ?, ?)",
                     [(run_id, s.key, iso(s.start_utc), s.minutes) for s in slots])
                 self.conn.executemany(
                     "INSERT INTO run_days (run_id, day, cutoff_utc) VALUES (?, ?, ?)",
                     [(run_id, day, iso(cutoff)) for day, cutoff in sorted(cutoffs.items())])
-        except sqlite3.IntegrityError as e:
-            if "runs.guild_id" in str(e) or "UNIQUE" in str(e):
+        except psycopg.errors.UniqueViolation as e:
+            if e.diag.constraint_name == "runs_guild_name_key":
                 raise DuplicateRun(name) from e
             raise
         return run_id
@@ -270,7 +265,7 @@ class DB:
                     "SELECT id FROM slots WHERE run_id = ? AND slot_key = ?", (run_id, key)).fetchone()
                 if row:
                     self.conn.execute(
-                        "INSERT OR IGNORE INTO availability (run_id, discord_id, slot_id) VALUES (?, ?, ?)",
+                        "INSERT INTO availability (run_id, discord_id, slot_id) VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
                         (run_id, did, row["id"]))
 
     def tick_rows(self, run_id, snapshots=True):
@@ -408,8 +403,9 @@ class DB:
     def grant_helper(self, fight_id, discord_id, granted_by, now):
         with self.conn:
             self.conn.execute(
-                "INSERT OR REPLACE INTO helper_grants (fight_id, discord_id, granted_by, granted_utc) "
-                "VALUES (?, ?, ?, ?)", (fight_id, str(discord_id), str(granted_by), iso(now)))
+                "INSERT INTO helper_grants (fight_id, discord_id, granted_by, granted_utc) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (fight_id, discord_id) DO UPDATE SET granted_by = excluded.granted_by, "
+                "granted_utc = excluded.granted_utc", (fight_id, str(discord_id), str(granted_by), iso(now)))
 
     def revoke_helper(self, fight_id, discord_id):
         with self.conn:
@@ -489,16 +485,18 @@ class DB:
             else:
                 self.conn.execute("DELETE FROM draft_notes WHERE run_id = ?", (run_id,))
             for pa in parties:
-                cur = self.conn.execute(
-                    "INSERT INTO parties (run_id, slot_id, party_index, status, target_idx) VALUES (?, ?, ?, 'draft', ?)",
-                    (run_id, slot_ids[pa["slot_key"]], pa["party_index"], pa["target_idx"]))
+                party_id = self.conn.execute(
+                    "INSERT INTO parties (run_id, slot_id, party_index, status, target_idx) "
+                    "VALUES (?, ?, ?, 'draft', ?) RETURNING id",
+                    (run_id, slot_ids[pa["slot_key"]], pa["party_index"], pa["target_idx"])).fetchone()["id"]
                 self.conn.executemany(
                     """INSERT INTO party_members (party_id, discord_id, role, is_helper, placed_down, distance)
                        VALUES (?, ?, ?, ?, ?, ?)""",
-                    [(cur.lastrowid, m["discord_id"], m["role"], int(m["helper"]), int(m["placed_down"]),
+                    [(party_id, m["discord_id"], m["role"], int(m["helper"]), int(m["placed_down"]),
                       int(m["distance"])) for m in pa["members"]])
             self.conn.executemany(
-                "INSERT OR REPLACE INTO draft_notes (run_id, kind, ref, text) VALUES (?, ?, ?, ?)",
+                "INSERT INTO draft_notes (run_id, kind, ref, text) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (run_id, kind, ref) DO UPDATE SET text = excluded.text",
                 [(run_id, kind, ref, text) for kind, ref, text in notes])
 
     def parties(self, run_id):
@@ -527,7 +525,8 @@ class DB:
     def day_party_counts(self, run_id, day):
         """(draft parties, approved parties) on one day."""
         row = self.conn.execute(
-            """SELECT COALESCE(SUM(p.status = 'draft'), 0) AS d, COALESCE(SUM(p.status != 'draft'), 0) AS c
+            """SELECT COUNT(*) FILTER (WHERE p.status = 'draft') AS d,
+                      COUNT(*) FILTER (WHERE p.status != 'draft') AS c
                FROM parties p JOIN slots s ON s.id = p.slot_id
                WHERE p.run_id = ? AND substr(s.slot_key, 1, 10) = ?""", (run_id, day)).fetchone()
         return row["d"], row["c"]
@@ -548,8 +547,8 @@ class DB:
                 (run_id, run_id, day)).fetchall()
             for p in drafts:                       # freeze the solver's version before anyone edits it
                 self.conn.execute(
-                    """INSERT OR IGNORE INTO party_originals (party_id, run_id, slot_id, taken_utc, target_idx, members_json)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    """INSERT INTO party_originals (party_id, run_id, slot_id, taken_utc, target_idx, members_json)
+                       VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (party_id) DO NOTHING""",
                     (p["id"], run_id, p["slot_id"], iso(datetime.now(timezone.utc)), p["target_idx"],
                      json.dumps([_member_dict(m) for m in self.party_members(p["id"])])))
             cur = self.conn.execute(
@@ -598,7 +597,7 @@ class DB:
         if key not in GUILD_SETTING_KEYS:
             raise KeyError(key)
         with self.conn:
-            self.conn.execute("INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)", (str(guild_id),))
+            self.conn.execute("INSERT INTO guild_settings (guild_id) VALUES (?) ON CONFLICT DO NOTHING", (str(guild_id),))
             self.conn.execute(f"UPDATE guild_settings SET {key} = ? WHERE guild_id = ?",
                               (None if value is None else str(value), str(guild_id)))
 
@@ -634,15 +633,14 @@ class DB:
     def log_change(self, party, actor_id, kind, now, *, player_id=None, other_player_id=None, reason_code=None,
                    reason_text=None, warnings=None, detail=None):
         """Append one row to party_changes (call inside `with self.conn`). Returns its id."""
-        cur = self.conn.execute(
+        return self.conn.execute(
             """INSERT INTO party_changes (party_id, run_id, slot_id, at_utc, actor_id, kind, player_id,
                                           other_player_id, reason_code, reason_text, warnings_json, detail_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id""",
             (party["id"], party["run_id"], party["slot_id"], iso(now), str(actor_id), kind,
              None if player_id is None else str(player_id), None if other_player_id is None else str(other_player_id),
              reason_code, reason_text, json.dumps(warnings) if warnings else None,
-             json.dumps(detail) if detail else None))
-        return cur.lastrowid
+             json.dumps(detail) if detail else None)).fetchone()["id"]
 
     def party_changes(self, party_id):
         return self.conn.execute("SELECT * FROM party_changes WHERE party_id = ? ORDER BY id", (party_id,)).fetchall()
@@ -666,7 +664,8 @@ class DB:
             self.conn.execute("UPDATE parties SET status = 'done', ended_utc = ?, ended_by = ? WHERE id = ?",
                               (iso(now), str(by), party_id))
             self.conn.executemany(
-                "INSERT OR REPLACE INTO play_log (slot_id, discord_id, minutes) VALUES (?, ?, ?)",
+                "INSERT INTO play_log (slot_id, discord_id, minutes) VALUES (?, ?, ?) "
+                "ON CONFLICT (slot_id, discord_id) DO UPDATE SET minutes = excluded.minutes",
                 [(party["slot_id"], m["discord_id"], minutes) for m in self.party_members(party_id)])
             if by != "auto":
                 self.log_change(party, actor_id or by, "end_override" if override else "ended", now,
@@ -730,13 +729,14 @@ class DB:
                 "INSERT INTO party_members (party_id, discord_id, role, is_helper, placed_down, distance) "
                 "VALUES (?, ?, ?, ?, 0, 0)", (party_id, in_id, in_role, int(is_helper)))
             self.conn.execute("DELETE FROM standby WHERE slot_id = ? AND discord_id = ?", (party["slot_id"], in_id))
-            self.conn.execute("INSERT OR IGNORE INTO standby (slot_id, discord_id) VALUES (?, ?)",
+            self.conn.execute("INSERT INTO standby (slot_id, discord_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
                               (party["slot_id"], out_id))
             self.conn.execute("DELETE FROM play_log WHERE slot_id = ? AND discord_id = ?", (party["slot_id"], out_id))
             self.conn.execute("DELETE FROM votes WHERE slot_id = ? AND (voter_id = ? OR target_id = ?)",
                               (party["slot_id"], out_id, out_id))
             if party["ended_utc"] and minutes is not None:
-                self.conn.execute("INSERT OR REPLACE INTO play_log (slot_id, discord_id, minutes) VALUES (?, ?, ?)",
+                self.conn.execute("INSERT INTO play_log (slot_id, discord_id, minutes) VALUES (?, ?, ?) "
+                                  "ON CONFLICT (slot_id, discord_id) DO UPDATE SET minutes = excluded.minutes",
                                   (party["slot_id"], in_id, minutes))
             return self.log_change(party, actor_id, "swap", now, player_id=out_id, other_player_id=in_id,
                                    reason_code=reason_code, reason_text=reason_text, warnings=warnings,

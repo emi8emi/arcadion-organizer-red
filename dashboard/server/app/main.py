@@ -6,13 +6,17 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import auth, config, runs
-from .db import init_db
+from .db import close_db, init_db, pool
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    yield
+    pool.open()
+    try:
+        yield
+    finally:
+        close_db()
 
 
 app = FastAPI(lifespan=lifespan)

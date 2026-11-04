@@ -98,15 +98,18 @@ def _apply_remap(db, fight_id, encounter, remap):
     conn = db.conn
 
     def rewrite(select, update, params=()):
+        """`select` returns the row's key columns, then the checkpoint number last; `update` takes (new, *key)."""
         nonlocal changed
         for row in conn.execute(select, params).fetchall():
-            new = remap.get(row[1], row[1])
-            if new != row[1]:
-                conn.execute(update, (new, row[0]))
+            *key, old = tuple(row)
+            new = remap.get(old, old)
+            if new != old:
+                conn.execute(update, (new, *key))
                 changed += 1
     runs = "(SELECT id FROM runs WHERE fight_id = ?)"
-    rewrite(f"SELECT rowid, prog_index FROM day_snapshots WHERE prog_index IS NOT NULL AND run_id IN {runs}",
-            "UPDATE day_snapshots SET prog_index = ? WHERE rowid = ?", (fight_id,))
+    rewrite(f"SELECT run_id, day, discord_id, prog_index FROM day_snapshots "
+            f"WHERE prog_index IS NOT NULL AND run_id IN {runs}",
+            "UPDATE day_snapshots SET prog_index = ? WHERE run_id = ? AND day = ? AND discord_id = ?", (fight_id,))
     rewrite(f"SELECT id, target_idx FROM parties WHERE target_idx IS NOT NULL AND run_id IN {runs}",
             "UPDATE parties SET target_idx = ? WHERE id = ?", (fight_id,))
     rewrite(f"SELECT party_id, target_idx FROM party_originals WHERE target_idx IS NOT NULL AND run_id IN {runs}",
@@ -137,8 +140,8 @@ def sync_fight(db, doc, fallback_short=None):
             name = doc.get("display_name") or doc.get("encounter_name") or short
             if db.conn.execute("SELECT 1 FROM fights WHERE name = ?", (name,)).fetchone():
                 name = f"{name} ({short})"
-            cur = db.conn.execute("INSERT INTO fights (name, short_name) VALUES (?, ?)", (name, short))
-            fight_id = cur.lastrowid
+            fight_id = db.conn.execute("INSERT INTO fights (name, short_name) VALUES (?, ?) RETURNING id",
+                                       (name, short)).fetchone()["id"]
         else:
             fight_id = row["id"]
         old = [(c["idx"], c["phase"], c["name"]) for c in db.checkpoints(fight_id)]

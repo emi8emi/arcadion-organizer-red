@@ -101,8 +101,10 @@ def save_prompt(db, slot_id, kind, channel_id, message_id, now, reminded=False):
     old = prompt_rows(db, slot_id).get(kind)
     reminded_utc = iso(now) if reminded else (old["reminded_utc"] if old else None)
     with db.conn:
-        db.conn.execute("INSERT OR REPLACE INTO confirm_prompts (slot_id, kind, channel_id, message_id, posted_utc, "
-                        "reminded_utc) VALUES (?, ?, ?, ?, ?, ?)",
+        db.conn.execute("INSERT INTO confirm_prompts (slot_id, kind, channel_id, message_id, posted_utc, "
+                        "reminded_utc) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (slot_id, kind) DO UPDATE SET "
+                        "channel_id = excluded.channel_id, message_id = excluded.message_id, "
+                        "posted_utc = excluded.posted_utc, reminded_utc = excluded.reminded_utc",
                         (slot_id, kind, str(channel_id), str(message_id), iso(now), reminded_utc))
 
 

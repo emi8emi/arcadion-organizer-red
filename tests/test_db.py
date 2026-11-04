@@ -1,4 +1,4 @@
-import sqlite3
+import psycopg
 import pytest
 
 from bot.db import DB, DraftConflict, DuplicateRun, SchemaNotReady
@@ -6,10 +6,9 @@ import bot.db
 from conftest import NOW, add_player, confirm, fill_one_party
 
 
-def test_opening_twice_is_fine_and_syncs_the_fight_once(tmp_path):
-    path = str(tmp_path / "bot.sqlite3")
-    DB(path).close()
-    db = DB(path)                                   # opening again changes nothing
+def test_opening_twice_is_fine_and_syncs_the_fight_once(db_url):
+    DB(db_url).close()
+    db = DB(db_url)                                   # opening again changes nothing
     assert len(db.fights()) == 1
     assert len(db.checkpoints(1)) == 20           # the 19 points of the test file plus the automatic Clear
 
@@ -33,7 +32,7 @@ def test_find_fight_by_short_name_and_partial(ctx):
 
 def test_foreign_keys_are_enforced(ctx, make_run):
     run = make_run()
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(psycopg.errors.ForeignKeyViolation):
         ctx.db.conn.execute("INSERT INTO availability (run_id, discord_id, slot_id) VALUES (?, 'ghost', 1)",
                             (run["id"],))
 
@@ -157,41 +156,37 @@ def test_replace_draft_with_a_day_ignores_confirmed_parties_on_other_days(ctx, m
 
 # ---------------------------------------------------------------- the dashboard owns the schema
 
-def test_the_bot_refuses_a_database_nobody_migrated(tmp_path, monkeypatch):
-    monkeypatch.setattr(DB, "bootstrap", None)              # no test help: this is what a real start sees
-    path = str(tmp_path / "empty.sqlite3")
+def tables(url):
+    with psycopg.connect(url, autocommit=True) as conn:
+        return conn.execute("SELECT table_name FROM information_schema.tables "
+                            "WHERE table_schema = current_schema() ORDER BY 1").fetchall()
+
+
+def test_the_bot_refuses_a_database_nobody_migrated(unmigrated_url):
     with pytest.raises(SchemaNotReady, match=r"schema version 0 .*python -m app\.migrate"):
-        DB(path)
-    conn = sqlite3.connect(path)
-    assert conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0] == 0     # and created nothing
+        DB(unmigrated_url)
+    assert tables(unmigrated_url) == []                     # and created nothing
 
 
-def test_the_bot_refuses_a_database_behind_the_version_it_needs(tmp_path, monkeypatch):
-    path = str(tmp_path / "bot.sqlite3")
-    DB(path).close()
-    monkeypatch.setattr(DB, "bootstrap", None)
+def test_the_bot_refuses_a_database_behind_the_version_it_needs(db_url, monkeypatch):
     monkeypatch.setattr(bot.db, "REQUIRED_SCHEMA_VERSION", bot.db.REQUIRED_SCHEMA_VERSION + 1)
     with pytest.raises(SchemaNotReady, match="needs 2"):
-        DB(path)
+        DB(db_url)
 
 
-def test_opening_a_migrated_database_changes_no_table(tmp_path, monkeypatch):
-    path = str(tmp_path / "bot.sqlite3")
-    DB(path).close()
-    snapshot = lambda: sqlite3.connect(path).execute(          # noqa: E731
-        "SELECT type, name, sql FROM sqlite_master ORDER BY name").fetchall()
-    before = snapshot()
-    monkeypatch.setattr(DB, "bootstrap", None)
-    DB(path).close()
-    assert snapshot() == before
+def test_opening_a_migrated_database_changes_no_table(db_url):
+    DB(db_url).close()
+    before = tables(db_url)
+    DB(db_url).close()
+    assert tables(db_url) == before and ("schema_migrations",) in [tuple(r) for r in before]
 
 
-def test_a_database_ahead_of_the_bot_is_fine(tmp_path, monkeypatch):
-    path = str(tmp_path / "bot.sqlite3")
-    DB(path).close()
-    conn = sqlite3.connect(path)
-    conn.execute("INSERT INTO schema_migrations (version, name, checksum, applied_utc) VALUES (99, 'later', 'x', 'x')")
-    conn.commit()
-    conn.close()
-    monkeypatch.setattr(DB, "bootstrap", None)              # the bot must not need the dashboard's runner for this
-    DB(path).close()
+def test_a_database_ahead_of_the_bot_is_fine(db_url):
+    with psycopg.connect(db_url, autocommit=True) as conn:
+        conn.execute("INSERT INTO schema_migrations (version, name, checksum, applied_utc) VALUES (99, 'later', 'x', 'x')")
+    DB(db_url).close()
+
+
+def test_a_lost_connection_is_reopened_for_the_next_statement(ctx):
+    ctx.db.conn._c.close()                                    # what a database restart or idle timeout looks like
+    assert ctx.db.fights()[0]["short_name"] == "UWU"

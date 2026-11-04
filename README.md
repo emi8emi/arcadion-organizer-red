@@ -23,21 +23,24 @@ the weights live in later steps. See "What is not built yet".
    uv run python -m bot
    ```
 
-   `.env` and the database are git-ignored. Never paste the token anywhere else.
+   `.env` is git-ignored. Never paste the token or the database password anywhere else.
 
-   **The dashboard owns the database schema, so the bot cannot create it.** The bot refuses to start on a
-   database that has not been migrated far enough. Migrate it first, either by starting the dashboard (it
-   migrates on startup) or by hand (standard library only, nothing to install):
+   **The database is PostgreSQL, and the dashboard owns its schema, so the bot cannot create tables.** Set
+   `DATABASE_URL` in `.env` (the dashboard's `.env` needs the same URL), for example
+   `postgresql://raidbot:password@localhost:5432/raidbot`. The bot and the dashboard may run on different
+   machines; for a remote database add `?sslmode=require`. For a local one, `docker compose up -d` starts
+   PostgreSQL with the user, password and databases used by the examples and the tests.
+
+   The bot refuses to start on a database that has not been migrated far enough. Migrate it first, either by
+   starting the dashboard (it migrates on startup) or by hand:
 
    ```bash
-   cd dashboard/server && python -m app.migrate        # creates or upgrades the file the bot will use
+   cd dashboard/server && pip install -r requirements.txt && python -m app.migrate
    ```
 
-   Do this again after pulling a change that adds a file to `dashboard/server/app/migrations/`. Both programs
-   must point at the same file: leave `DB_PATH` unset (default `raidbot.sqlite3` in the repo root, for the bot
-   and the dashboard alike) or give both the same value. A relative path means relative to the repo root.
+   Do this again after pulling a change that adds a file to `dashboard/server/app/migrations/`.
 4. Optional settings: `config.json` (grid hours, default limits, organizer role id) and `.env`
-   (`ORGANIZER_ROLE_ID`, `DB_PATH`). People with **Manage Server** are always organizers.
+   (`ORGANIZER_ROLE_ID`, `DATABASE_URL`). People with **Manage Server** are always organizers.
 
 ## A run, start to finish
 
@@ -163,7 +166,7 @@ every party in the draft matches the signups (known slot and players, ticked slo
 
 ```
 bot/grid.py        slot grid (America/New_York, DST safe)      bot/solver_io.py  export, import, fingerprint
-bot/db.py          SQLite layer                                 bot/heatmap.py    /run status table
+bot/db.py          database layer (PostgreSQL)                                bot/heatmap.py    /run status table
 bot/handlers.py    command logic (no Discord decorators)        bot/views.py      /availability menu and modal
 bot/commands.py    slash command registration                   bot/app.py        client, command sync
 dashboard/server/app/migrations/   the schema (dashboard-owned)  tests/            pytest suite
@@ -182,7 +185,7 @@ uv run python -m bot.seed --remove                   # delete every fake player 
 ```
 
 Options: `--count N` (more fakes, in whole parties), `--prog N` (their checkpoint, default 0 = P1 fresh; set yours
-to match), `--helpers N`, `--slot KEY` (repeatable, to tick only some slots), `--guild-id`, `--db FILE`.
+to match), `--helpers N`, `--slot KEY` (repeatable, to tick only some slots), `--guild-id`, `--database-url URL`.
 Create the run first (`/run create`) and seed **before the day's cutoff**: after it a day's signups are frozen in
 a snapshot, and the script skips days that have one. The script can run while the bot is running; run it again
 to reset the fakes. Their ids are 19-digit numbers above 9e18 that no real account can have, and they are not
@@ -206,8 +209,10 @@ new table or column. Fights and checkpoints are still data the bot syncs from `p
 uv run pytest
 ```
 
-The suite also covers the dashboard's migration runner (`dashboard/server/tests`). Every test database gets the
-dashboard's migrations applied first, exactly as a real start would find them.
+The tests need a PostgreSQL server: `docker compose up -d` starts one that matches the default
+`TEST_DATABASE_URL` (`postgresql://postgres:postgres@localhost:5432/raidtest`). Each test gets its own schema with the
+dashboard's migrations applied, so tests cannot see each other's data and nothing is left behind. The suite also covers
+the dashboard's migration runner (`dashboard/server/tests`).
 
 They cover the grid (including both DST-change days), the database layer, the export and fingerprint,
 draft import and its refusals, the heatmap, and every command handler and menu callback using fake

@@ -132,23 +132,21 @@ def make_file_run(db):
     return run_id
 
 
-def test_a_restart_neither_forgets_nor_repeats(tmp_path, cfg):
-    path = str(tmp_path / "bot.sqlite3")
-    first = DB(path)
+def test_a_restart_neither_forgets_nor_repeats(cfg):
+    first = DB(cfg["database_url"])
     run_id = make_file_run(first)
     sent_at = CUTOFF + timedelta(minutes=1)
     assert len(due_reminders(first, sent_at, cfg)) == 1
     first.mark_reminded(run_id, "2026-11-02", sent_at)
     first.close()                                                   # the bot restarts
 
-    second = DB(path)
+    second = DB(cfg["database_url"])
     assert due_reminders(second, sent_at + timedelta(minutes=5), cfg) == []             # no double send
     assert len(due_reminders(second, sent_at + timedelta(minutes=30), cfg)) == 1        # and no forgetting
 
 
-def test_a_long_outage_catches_up_with_one_reminder_not_a_burst(tmp_path, cfg):
-    path = str(tmp_path / "bot.sqlite3")
-    db = DB(path)
+def test_a_long_outage_catches_up_with_one_reminder_not_a_burst(cfg):
+    db = DB(cfg["database_url"])
     run_id = make_file_run(db)
     back_online = CUTOFF + timedelta(hours=3)                       # the bot was down since before the cutoff
     items = due_reminders(db, back_online, cfg)

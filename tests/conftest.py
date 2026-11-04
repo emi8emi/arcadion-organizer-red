@@ -1,12 +1,21 @@
-"""Shared fixtures: an in-memory bot context, a fixed clock, and fake Discord interactions."""
+"""Shared fixtures: a bot context on a private Postgres schema, a fixed clock, and fake Discord interactions.
+
+The tests need a PostgreSQL server (`docker compose up -d` starts one that matches the default URL). Set
+TEST_DATABASE_URL to use another. Each test gets its own schema in that database, with the dashboard's
+migrations applied, and the schema is dropped afterwards, so tests cannot see each other's data.
+"""
 import asyncio
 import importlib.util
+import itertools
+import os
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import psycopg
 import pytest
+from psycopg.conninfo import make_conninfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -110,11 +119,46 @@ def _load_dashboard_migrate():
 dashboard_migrate = _load_dashboard_migrate()
 
 
-@pytest.fixture(autouse=True)
-def dashboard_schema(monkeypatch):
-    """Every DB a test opens (memory or file) gets the dashboard's migrations applied first, like a real start."""
-    import bot.db
-    monkeypatch.setattr(bot.db.DB, "bootstrap", staticmethod(dashboard_migrate.apply_migrations))
+TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/raidtest")
+_schema_ids = itertools.count(1)
+
+
+@pytest.fixture(scope="session")
+def pg_admin():
+    try:
+        conn = psycopg.connect(TEST_DATABASE_URL, autocommit=True, connect_timeout=5)
+    except psycopg.Error as e:
+        pytest.exit(f"Cannot reach the test database ({e}).\nStart one with `docker compose up -d`, or point "
+                    f"TEST_DATABASE_URL at any empty PostgreSQL database.", returncode=2)
+    yield conn
+    conn.close()
+
+
+def scratch_schema(pg_admin, migrated=True):
+    """Make a new empty schema and return (connection string that uses only it, its name)."""
+    name = f"t{os.getpid()}_{next(_schema_ids)}"
+    pg_admin.execute(f'CREATE SCHEMA "{name}"')
+    url = make_conninfo(TEST_DATABASE_URL, options=f"-c search_path={name}")
+    if migrated:
+        with psycopg.connect(url, autocommit=True) as conn:
+            dashboard_migrate.apply_migrations(conn)
+    return url, name
+
+
+@pytest.fixture
+def unmigrated_url(pg_admin):
+    """A private schema with nothing in it: what a database nobody has migrated looks like."""
+    url, name = scratch_schema(pg_admin, migrated=False)
+    yield url
+    pg_admin.execute(f'DROP SCHEMA "{name}" CASCADE')
+
+
+@pytest.fixture
+def db_url(pg_admin):
+    """Connection string for a private, migrated schema. Open it as many times as you like (a 'restart')."""
+    url, name = scratch_schema(pg_admin)
+    yield url
+    pg_admin.execute(f'DROP SCHEMA "{name}" CASCADE')
 
 
 @pytest.fixture(autouse=True)
@@ -126,9 +170,9 @@ def test_prog_points(monkeypatch):
 
 
 @pytest.fixture
-def cfg(tmp_path):
+def cfg(tmp_path, db_url):
     c = load_config(env={})
-    c["db_path"] = ":memory:"
+    c["database_url"] = db_url
     c["export_dir"] = str(tmp_path / "exports")
     return c
 
@@ -140,7 +184,9 @@ def clock():
 
 @pytest.fixture
 def ctx(cfg, clock):
-    return Ctx(db=DB(":memory:"), cfg=cfg, grid=GridConfig.from_config(cfg), now=lambda: clock["now"])
+    db = DB(cfg["database_url"])
+    yield Ctx(db=db, cfg=cfg, grid=GridConfig.from_config(cfg), now=lambda: clock["now"])
+    db.close()
 
 
 def evening_before_cutoffs(slots, cfg, days_before=1):
