@@ -19,7 +19,7 @@ PROG_POINTS_DIR = Path(__file__).resolve().parent.parent / "prog_points"
 
 # The newest dashboard migration this code depends on. Raise it in the same change that starts using a
 # new table or column; a database that is further along is fine (migrations only add things).
-REQUIRED_SCHEMA_VERSION = 1
+REQUIRED_SCHEMA_VERSION = 2
 
 
 GUILD_SETTING_KEYS = ("organizer_role_id", "reminder_channel_id", "parties_channel_id")

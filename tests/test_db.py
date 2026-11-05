@@ -170,7 +170,7 @@ def test_the_bot_refuses_a_database_nobody_migrated(unmigrated_url):
 
 def test_the_bot_refuses_a_database_behind_the_version_it_needs(db_url, monkeypatch):
     monkeypatch.setattr(bot.db, "REQUIRED_SCHEMA_VERSION", bot.db.REQUIRED_SCHEMA_VERSION + 1)
-    with pytest.raises(SchemaNotReady, match="needs 2"):
+    with pytest.raises(SchemaNotReady, match="needs 3"):
         DB(db_url)
 
 
@@ -196,3 +196,30 @@ def test_parse_role_accepts_the_usual_spellings():
     from bot.config import parse_role
     assert parse_role("Main tank") == "main_tank" and parse_role(" off-tank ") == "off_tank"
     assert parse_role("CASTER") == "caster" and parse_role("dps") is None and parse_role("") is None
+
+
+def test_migration_0002_refuses_old_roles_and_then_accepts_the_new_ones(unmigrated_url, tmp_path):
+    """A database with tank/healer/dps parties is not converted behind your back: it stops with a message."""
+    import shutil
+    from conftest import dashboard_migrate as mig
+    folder = tmp_path / "only_0001"
+    folder.mkdir()
+    shutil.copy(mig.MIGRATIONS_DIR / "0001_baseline.sql", folder)
+    with psycopg.connect(unmigrated_url, autocommit=True) as conn:
+        assert mig.apply_migrations(conn, folder) == [1]
+        conn.execute("INSERT INTO fights (id, name, short_name) VALUES (1, 'F', 'F')")
+        conn.execute("INSERT INTO runs (guild_id, name, fight_id, start_date, end_date, signup_deadline_utc, status, "
+                     "created_by, created_utc) VALUES ('1', 'r', 1, '2026-11-01', '2026-11-01', 'x', 'open', '1', 'x')")
+        conn.execute("INSERT INTO slots (run_id, slot_key, start_utc, minutes) VALUES (1, 'k', 'x', 90)")
+        conn.execute("INSERT INTO players (discord_id, display_name) VALUES ('9', 'Old')")
+        conn.execute("INSERT INTO parties (run_id, slot_id, party_index, status, target_idx) VALUES (1, 1, 0, 'draft', 0)")
+        conn.execute("INSERT INTO party_members (party_id, discord_id, role) VALUES (1, '9', 'dps')")
+        with pytest.raises(mig.MigrationError, match="old tank/healer/dps roles"):
+            mig.apply_migrations(conn)
+        assert mig.current_version(conn) == 1                       # rolled back, nothing half-converted
+        conn.execute("DELETE FROM parties")
+        assert mig.apply_migrations(conn) == [2]
+        conn.execute("INSERT INTO parties (run_id, slot_id, party_index, status, target_idx) VALUES (1, 1, 0, 'draft', 0)")
+        conn.execute("INSERT INTO party_members (party_id, discord_id, role) VALUES (2, '9', 'caster')")
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute("INSERT INTO party_members (party_id, discord_id, role) VALUES (2, '9', 'dps')")

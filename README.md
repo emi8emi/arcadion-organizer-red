@@ -287,8 +287,10 @@ docker-compose.yml         local PostgreSQL for development and tests
 
 The default party is 8 seats: `main_tank`, `off_tank`, `regen`, `shield`, `melee` (x2), `ranged` and `caster`
 (`party` in `config.json`). **The solver must use the same party**: `arcadion-solver` branch `seven-roles` (its
-`config.json` has the same `party`). The old tank/healer/dps roles are gone: a database made before this change
-is refused at startup with a message; move it aside and start fresh.
+`config.json` has the same `party`). The old tank/healer/dps roles are gone: migration `0002_seven_party_roles.sql` adds the new
+role check. It does not convert old parties (a "tank" could be either tank): a database that still has parties
+with the old roles stops the migration with a message, so run `DELETE FROM parties;` first (test data only), then
+start the dashboard again. The bot needs schema version 2.
 
 ## Testing alone with fake players
 
