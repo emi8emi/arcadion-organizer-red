@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 
 	let user = null;
-	let runs = [];
+	let events = [];
 	let loading = true;
 	let error = '';
 
@@ -19,8 +19,8 @@
 		const me = await fetch('/api/auth/me');
 		if (me.ok) {
 			user = await me.json();
-			const res = await fetch('/api/runs');
-			if (res.ok) runs = await res.json();
+			const res = await fetch('/api/events');
+			if (res.ok) events = await res.json();
 		}
 		loading = false;
 	});
@@ -28,12 +28,12 @@
 	async function logout() {
 		await fetch('/api/auth/logout', { method: 'POST' });
 		user = null;
-		runs = [];
+		events = [];
 	}
 </script>
 
 <main>
-	<h1>Raid dashboard</h1>
+	<h1>Event dashboard</h1>
 
 	{#if loading}
 		<p>Loading...</p>
@@ -46,23 +46,21 @@
 			<button on:click={logout}>Logout</button>
 		</p>
 
-		<h2>Runs</h2>
-		{#if runs.length === 0}
-			<p>No runs yet.</p>
+		<h2>Events</h2>
+		{#if events.length === 0}
+			<p>No events yet.</p>
 		{:else}
 			<table>
 				<thead>
-					<tr><th>Name</th><th>Fight</th><th>Dates</th><th>Slots</th><th>Parties</th><th>Status</th></tr>
+					<tr><th>Name</th><th>Starts</th><th>Max players</th><th>Status</th></tr>
 				</thead>
 				<tbody>
-					{#each runs as r (r.id)}
+					{#each events as e (e.id)}
 						<tr>
-							<td>{r.name}</td>
-							<td>{r.fight}</td>
-							<td>{r.start_date} → {r.end_date}</td>
-							<td>{r.slots}</td>
-							<td>{r.parties}</td>
-							<td>{r.status}</td>
+							<td>{e.name}</td>
+							<td>{new Date(e.starts_at).toLocaleString()}</td>
+							<td>{e.max_players}</td>
+							<td>{e.status}</td>
 						</tr>
 					{/each}
 				</tbody>
