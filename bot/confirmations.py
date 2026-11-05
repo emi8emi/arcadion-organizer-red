@@ -14,7 +14,7 @@ from datetime import timedelta
 
 import discord
 
-from .config import ROLES
+from .config import ROLES, role_label
 from .db import iso, parse_iso
 from .votes import slot_end
 
@@ -167,7 +167,7 @@ def prompt_text(ctx, run, slot, ask=None, reminder=False):
         for m in sorted(members, key=lambda m: (order[m["role"]], m["discord_id"])):
             row = have.get(m["discord_id"])
             note = f" · {cancel_label(row['reason_code'], row['reason_text'])}" if row and row["status"] == "declined" else ""
-            lines.append(f"{MARKS[row['status'] if row else None]} <@{m['discord_id']}> {m['role']}{note}")
+            lines.append(f"{MARKS[row['status'] if row else None]} <@{m['discord_id']}> {role_label(m['role'])}{note}")
     lines.append("✅ confirmed · ⏳ waiting · ❌ can't make it" + (" · ▫️ not asked yet" if not approved else ""))
     return "\n".join(lines)[:1990]
 

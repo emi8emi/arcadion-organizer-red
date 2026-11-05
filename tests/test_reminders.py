@@ -126,7 +126,7 @@ def make_file_run(db):
                            end_date=date(2026, 11, 2), cutoffs=cutoffs, slots=slots, created_by=1, now=NOW)
     db.set_run_status(run_id, "open")
     for i in range(8):
-        db.upsert_player(i + 1, f"P{i}", roles=[["tank", "tank", "healer", "healer", "dps", "dps", "dps", "dps"][i]],
+        db.upsert_player(i + 1, f"P{i}", roles=[["main_tank", "off_tank", "regen", "shield", "melee", "melee", "ranged", "caster"][i]],
                          prog_index=0, now=NOW)
         db.set_day_availability(run_id, i + 1, "2026-11-02", [S2])
     return run_id

@@ -8,7 +8,7 @@ import discord
 from bot import handlers
 from bot.grid import day_cutoff, parse_hm
 from bot.services import day_state, signup_open
-from conftest import NOW, S1, S2, at, organizer, player, run_async
+from conftest import NOW, S1, S2, at, organizer, pick_roles, player, run_async
 
 UTC = timezone.utc
 NY = "America/New_York"
@@ -87,8 +87,8 @@ def test_closed_day_is_locked_but_other_days_still_save(ctx, make_run, clock):
         assert late.response.edits[-1]["view"] is view              # the menu stays open
 
         roles = player(5)                                           # roles and prog are not per day
-        await view.role_buttons[0].callback(roles)                  # the Tank toggle
-        assert ctx.db.get_player(5)["roles"] == "tank"
+        await pick_roles(view, roles, ["main_tank"])
+        assert ctx.db.get_player(5)["roles"] == "main_tank"
 
         view.day_select._values = ["2026-11-02"]
         await view.day_select.callback(player(5))
@@ -102,7 +102,7 @@ def test_closed_day_is_locked_but_other_days_still_save(ctx, make_run, clock):
 def test_menu_shows_each_days_cutoff_and_the_current_prog(ctx, make_run, clock):
     run = make_run(per_day=True)
     at(clock, "2026-11-01T12:00")
-    ctx.db.upsert_player(5, "Ann", roles=["tank"], prog_index=11, now=NOW)
+    ctx.db.upsert_player(5, "Ann", roles=["main_tank"], prog_index=11, now=NOW)
     ctx.db.set_day_availability(run["id"], 5, "2026-11-02", [S2])
 
     async def scenario():
@@ -124,7 +124,7 @@ def test_menu_shows_each_days_cutoff_and_the_current_prog(ctx, make_run, clock):
 def test_long_run_menu_message_stays_under_discords_limit(ctx, make_run, clock):
     run = make_run("Long", start=date(2026, 11, 1), end=date(2026, 11, 14), per_day=True)
     keys = [s["slot_key"] for s in ctx.db.run_slots(run["id"])]
-    ctx.db.upsert_player(5, "Ann", roles=["tank"], prog_index=18, now=NOW)
+    ctx.db.upsert_player(5, "Ann", roles=["main_tank"], prog_index=18, now=NOW)
     for day in sorted({k[:10] for k in keys}):
         ctx.db.set_day_availability(run["id"], 5, day, [k for k in keys if k[:10] == day])
 
@@ -267,7 +267,7 @@ def test_run_status_lists_each_days_state(ctx, make_run, clock):
 def test_every_select_and_modal_item_respects_discords_limits(ctx, make_run, clock):
     from bot.views import LimitsModal
     run = make_run("Long", start=date(2026, 11, 1), end=date(2026, 11, 14), per_day=True)
-    ctx.db.upsert_player(5, "Ann", roles=["tank"], prog_index=18, now=NOW)
+    ctx.db.upsert_player(5, "Ann", roles=["main_tank"], prog_index=18, now=NOW)
 
     async def scenario():
         it = player(5, "Ann")

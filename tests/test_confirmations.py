@@ -91,7 +91,7 @@ def test_draft_confirm_posts_one_message_per_slot_pinging_everyone(ctx, make_run
     first = chan.sent[0]
     assert isinstance(first["view"], ConfirmView) and {u.id for u in first["allowed_mentions"].users} == set(range(1, 9))
     assert [c.item.custom_id for c in first["view"].children] == [f"cfm:{slot_id(ctx, run)}", f"cnc:{slot_id(ctx, run)}"]
-    assert "⏳ <@1> tank" in first["content"] and "Draft parties are ready" in first["content"]
+    assert "⏳ <@1> Main tank" in first["content"] and "Draft parties are ready" in first["content"]
     assert status(ctx, slot_id(ctx, run), 1) == "pending"
     assert cf.prompt_rows(ctx.db, slot_id(ctx, run))["draft"]["channel_id"] == str(PARTIES_CHANNEL)
 
@@ -263,7 +263,7 @@ def test_a_swapped_in_player_is_asked_to_confirm(ctx, make_run):
     approve(ctx, None, D2)
     sid = slot_id(ctx, run)
     pid = ctx.db.parties(run["id"])[0]["id"]
-    run_async(apply_swap(ctx, 100, pid, "1", "30", "tank", 999, reason_code="no_show", reason_text=""))
+    run_async(apply_swap(ctx, 100, pid, "1", "30", "main_tank", 999, reason_code="no_show", reason_text=""))
     assert status(ctx, sid, 30) == "pending"
     last = [m for m in chan.threads[7000].sent if isinstance(m.get("view"), ConfirmView)][-1]
     assert [u.id for u in last["allowed_mentions"].users] == [30]

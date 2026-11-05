@@ -55,7 +55,7 @@ def setup_day(ctx, make_run, slots=(S2,), first=1):
     run = make_run(per_day=True)
     n = len(slots)
     ids = [add_party_players(ctx, run, [slot], first_id=first + 8 * i) for i, slot in enumerate(slots)]
-    roles = ["tank"] * 2 + ["healer"] * 2 + ["dps"] * 4
+    roles = ["main_tank", "off_tank", "regen", "shield", "melee", "melee", "ranged", "caster"]
     from bot.solver_io import build_signups, fingerprint
     data, _ = build_signups(ctx.db, run, ctx.cfg, D2, ctx.now())
     draft = {"version": 1, "input_fingerprint": fingerprint(data), "unfilled_slots": [], "unmatched_players": [],
@@ -92,7 +92,7 @@ def test_approve_confirms_and_posts_one_thread_per_slot_one_message_per_party(ct
     assert msg["allowed_mentions"].users is True and msg["allowed_mentions"].everyone is False
     text = msg["content"]
     assert text.startswith("**Party 1** · <t:") and ":F>" in text and ":R>" in text
-    assert "Target: 0: P1 Fresh" in text and "• <@1> tank" in text and "• <@8> dps" in text
+    assert "Target: 0: P1 Fresh" in text and "• <@1> Main tank" in text and "• <@8> Caster" in text
     slots = {s["slot_key"]: s for s in ctx.db.run_slots(run["id"])}
     assert slots[S2]["thread_id"] == "7000" and slots[S2B]["thread_id"] == "7001"
     assert all(p["message_id"] for p in ctx.db.parties(run["id"]))
@@ -106,7 +106,7 @@ def test_party_message_marks_helpers_and_players_placed_down(ctx, make_run):
     confirm(ctx, run)
     slot, [(party, members)] = ctx.db.approved_slots(run["id"], D2)[0]
     text = party_message(run, slot, party, members, ctx.db.checkpoints(1))
-    assert "• <@3> healer · helper" in text and "• <@8> dps · placed below their prog" in text
+    assert "• <@3> Regen healer · helper" in text and "• <@8> Caster · placed below their prog" in text
     assert len(text) < 2000
 
 
@@ -198,7 +198,7 @@ def test_myschedule_shows_the_party_once_it_is_confirmed(ctx, make_run, clock):
     approve(ctx)
     it = player(1)
     run_async(handlers.myschedule(ctx, it))
-    assert "Your confirmed parties:" in it.text and "as tank" in it.text
+    assert "Your confirmed parties:" in it.text and "as Main tank" in it.text
 
 
 def test_an_imported_draft_cannot_replace_an_approved_day(ctx, make_run):

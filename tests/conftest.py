@@ -230,8 +230,8 @@ def add_player(ctx, run, uid, roles, prog, keys, name=None, per_day=2, per_run=4
 
 
 def fill_one_party(ctx, run, slot_key="2026-11-02T17:00", first_id=1, prog=0):
-    """Eight players (2 tank, 2 healer, 4 dps) who all ticked the same slot."""
-    roles = ["tank"] * 2 + ["healer"] * 2 + ["dps"] * 4
+    """Eight players (the seven-role party) who all ticked the same slot."""
+    roles = ["main_tank", "off_tank", "regen", "shield", "melee", "melee", "ranged", "caster"]
     for i, r in enumerate(roles):
         add_player(ctx, run, first_id + i, [r], prog, [slot_key])
     return list(range(first_id, first_id + 8))
@@ -243,7 +243,7 @@ SLOT = "2026-11-02T17:00"
 def draft_for(ctx, run, ids, **overrides):
     """A hand-made solver draft for the current signups: one party, ids in role order."""
     data, _ = build_signups(ctx.db, run, ctx.cfg)
-    roles = ["tank"] * 2 + ["healer"] * 2 + ["dps"] * 4
+    roles = ["main_tank", "off_tank", "regen", "shield", "melee", "melee", "ranged", "caster"]
     draft = {"version": 1, "input_fingerprint": fingerprint(data),
              "parties": [{"slot": SLOT, "party": 0, "target": {"index": 0, "name": "P1 Fresh"},
                           "members": [{"player": i, "role": r, "helper": False, "placed_down": False, "distance": 0}
@@ -259,7 +259,7 @@ def draft_for(ctx, run, ids, **overrides):
 S1 = "2026-11-01T17:00"      # Sun 1 Nov (the day clocks fall back)
 S2 = SLOT                    # Mon 2 Nov
 S3 = "2026-11-03T17:00"      # Tue 3 Nov
-ROLES_8 = ["tank"] * 2 + ["healer"] * 2 + ["dps"] * 4
+ROLES_8 = ["main_tank", "off_tank", "regen", "shield", "melee", "melee", "ranged", "caster"]
 
 
 def add_party_players(ctx, run, keys, first_id=1, **kw):
@@ -291,3 +291,11 @@ def confirm(ctx, run, day=None):
     """What /draft approve does to the database: the draft parties (of one day, or all) become confirmed."""
     days = [day] if day else sorted({s["slot_key"][:10] for s in ctx.db.run_slots(run["id"])})
     return sum(ctx.db.confirm_day(run["id"], d) for d in days)
+
+
+async def pick_roles(view, interaction, roles):
+    """Do what a player does in the Roles modal: choose these roles and submit."""
+    from bot.views import RolesModal
+    modal = RolesModal(view)
+    modal.select._values = list(roles)
+    await modal.on_submit(interaction)

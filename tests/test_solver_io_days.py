@@ -32,8 +32,8 @@ def seat(ctx, run, day, slot, ids, approve=False):
 
 def test_export_contains_only_that_days_slots_and_players(ctx, make_run):
     run = make_run()
-    add_player(ctx, run, 1, ["tank"], 0, [S1_])
-    add_player(ctx, run, 2, ["dps"], 0, [S2])
+    add_player(ctx, run, 1, ["main_tank"], 0, [S1_])
+    add_player(ctx, run, 2, ["melee"], 0, [S2])
     data, _ = build_signups(ctx.db, run, ctx.cfg, D2)
     assert {s["id"][:10] for s in data["slots"]} == {D2} and len(data["slots"]) == 11
     assert [p["id"] for p in data["players"]] == ["2"] and data["players"][0]["available"] == [S2]
@@ -93,7 +93,7 @@ def test_parties_on_the_same_or_later_days_do_not_reduce_the_cap(ctx, week):
 
 def test_unmatched_flag_comes_from_the_previous_day_with_a_draft(ctx, week):
     run, ids = week
-    add_player(ctx, run, 99, ["dps"], 0, [S1_, S2])          # ticked day 1, never seated
+    add_player(ctx, run, 99, ["melee"], 0, [S1_, S2])          # ticked day 1, never seated
     seat(ctx, run, D1, S1_, ids, approve=True)
     flags = {p["id"]: p["unmatched_last_run"] for p in build_signups(ctx.db, run, ctx.cfg, D2)[0]["players"]}
     assert flags["99"] is True and flags["1"] is False
@@ -102,10 +102,10 @@ def test_unmatched_flag_comes_from_the_previous_day_with_a_draft(ctx, week):
 def test_unmatched_flag_falls_back_to_the_previous_run(ctx, make_run):
     old = make_run("Old", status="closed")
     ids = add_party_players(ctx, old, [S2])
-    add_player(ctx, old, 99, ["dps"], 0, ["2026-11-02T20:00"])
+    add_player(ctx, old, 99, ["melee"], 0, ["2026-11-02T20:00"])
     seat(ctx, old, D2, S2, ids, approve=True)
     new = make_run("New")
-    add_player(ctx, new, 99, ["dps"], 0, [S2])
+    add_player(ctx, new, 99, ["melee"], 0, [S2])
     flags = {p["id"]: p["unmatched_last_run"] for p in build_signups(ctx.db, new, ctx.cfg, D2)[0]["players"]}
     assert flags == {"99": True}
 

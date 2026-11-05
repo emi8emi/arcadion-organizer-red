@@ -61,9 +61,9 @@ def test_get_run_by_name_and_newest(ctx, make_run):
 
 
 def test_upsert_player_updates_only_given_fields(ctx):
-    ctx.db.upsert_player(5, "Ann", roles=["dps", "tank"], prog_index=3, now=NOW)
+    ctx.db.upsert_player(5, "Ann", roles=["melee", "main_tank"], prog_index=3, now=NOW)
     p = ctx.db.upsert_player(5, "Ann the Tank", timezone="America/Chicago", now=NOW)
-    assert p["display_name"] == "Ann the Tank" and p["roles"] == "tank,dps"       # fixed role order
+    assert p["display_name"] == "Ann the Tank" and p["roles"] == "main_tank,melee"       # fixed role order
     assert p["prog_index"] == 3 and p["timezone"] == "America/Chicago"
     assert ctx.db.upsert_player(5, "Ann the Tank", prog_index=0)["prog_index"] == 0   # 0 is a real value
 
@@ -95,7 +95,7 @@ def test_helper_grant_and_revoke(ctx):
 
 
 def _party(slot, idx, ids):
-    roles = ["tank"] * 2 + ["healer"] * 2 + ["dps"] * 4
+    roles = ["main_tank", "off_tank", "regen", "shield", "melee", "melee", "ranged", "caster"]
     return {"slot_key": slot, "party_index": idx, "target_idx": 0,
             "members": [{"discord_id": str(i), "role": r, "helper": False, "placed_down": False, "distance": 0}
                         for i, r in zip(ids, roles)]}
@@ -124,7 +124,7 @@ def test_replace_draft_refuses_to_overwrite_confirmed_parties(ctx, make_run):
 def test_previous_unmatched_lists_ticked_players_without_a_party(ctx, make_run):
     old = make_run("Old", status="closed")
     ids = fill_one_party(ctx, old)
-    add_player(ctx, old, 99, ["dps"], 0, ["2026-11-02T20:00"])     # ticked, never seated
+    add_player(ctx, old, 99, ["melee"], 0, ["2026-11-02T20:00"])     # ticked, never seated
     ctx.db.replace_draft(old["id"], [_party("2026-11-02T17:00", 0, ids)], [])
     new = make_run("New")
     assert ctx.db.previous_unmatched(new) == set()                 # an unapproved draft does not count
@@ -190,3 +190,9 @@ def test_a_database_ahead_of_the_bot_is_fine(db_url):
 def test_a_lost_connection_is_reopened_for_the_next_statement(ctx):
     ctx.db.conn._c.close()                                    # what a database restart or idle timeout looks like
     assert ctx.db.fights()[0]["short_name"] == "UWU"
+
+
+def test_parse_role_accepts_the_usual_spellings():
+    from bot.config import parse_role
+    assert parse_role("Main tank") == "main_tank" and parse_role(" off-tank ") == "off_tank"
+    assert parse_role("CASTER") == "caster" and parse_role("dps") is None and parse_role("") is None

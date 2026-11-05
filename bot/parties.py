@@ -9,7 +9,7 @@ from datetime import timedelta
 
 import discord
 
-from .config import ROLES
+from .config import ROLES, role_label
 from .db import parse_iso, split_roles
 from .services import checkpoint_label
 from .votes import slot_end
@@ -63,7 +63,7 @@ def swap_warnings(ctx, party, in_id, in_role):
     if not roles:
         out.append("They have not signed up (no roles set with /availability).")
     elif in_role not in roles:
-        out.append(f"They do not list {in_role} among their roles ({', '.join(roles)}).")
+        out.append(f"They do not list {role_label(in_role)} among their roles ({', '.join(role_label(r) for r in roles)}).")
     prog = player["prog_index"] if player else None
     if prog is not None and party["target_idx"] is not None and prog < party["target_idx"]:
         cps = db.checkpoints(db.run(run_id)["fight_id"])
@@ -98,8 +98,8 @@ def comp_warnings(ctx, party, changes):
     have = {r: sum(v == r for v in members.values()) for r in ROLES}
     if all(have[r] == want.get(r, 0) for r in ROLES):
         return []
-    return ["The roles would be " + ", ".join(f"{have[r]} {r}" for r in ROLES)
-            + " instead of " + ", ".join(f"{want.get(r, 0)} {r}" for r in ROLES) + "."]
+    return ["The roles would be " + ", ".join(f"{have[r]} {role_label(r)}" for r in ROLES)
+            + " instead of " + ", ".join(f"{want.get(r, 0)} {role_label(r)}" for r in ROLES) + "."]
 
 
 # ---------------------------------------------------------------- Discord side effects
@@ -197,7 +197,7 @@ async def apply_swap(ctx, guild_id, party_id, out_id, in_id, in_role, actor_id, 
                 problems.append(f"Could not {'remove' if uid == out_id else 'add'} <@{uid}> "
                                 f"{'from' if uid == out_id else 'to'} the thread ({e}). I need Manage Threads.")
         try:                                                # the new player gets a real ping
-            await thread.send(f"<@{in_id}> joins party {n} as {in_role}, replacing <@{out_id}>.",
+            await thread.send(f"<@{in_id}> joins party {n} as {role_label(in_role)}, replacing <@{out_id}>.",
                               allowed_mentions=discord.AllowedMentions(users=[discord.Object(id=int(in_id))]))
         except Exception:
             log.exception("could not announce the swap")
@@ -269,7 +269,7 @@ def plan_import(ctx, data):
     if party is None or party["status"] not in ("confirmed", "done"):
         return party_id, [], [], ["That party is not approved, so it cannot be edited."]
     if any(role not in ROLES for _, role in new) or len({p for p, _ in new}) != len(new):
-        return party_id, [], [], ["Every member needs a unique player and a role of tank, healer or dps."]
+        return party_id, [], [], ["Every member needs a unique player and a role of main_tank, off_tank, regen, shield, melee, ranged or caster."]
     old = {m["discord_id"]: m["role"] for m in ctx.db.party_members(party_id)}
     removed = [p for p in old if p not in dict(new)]
     added = [(p, r) for p, r in new if p not in old]

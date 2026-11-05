@@ -68,7 +68,7 @@ def test_approving_stores_the_solvers_parties_and_edits_do_not_touch_them(ctx, m
     run, pid, thread, chan = approved(ctx, make_run)
     original = ctx.db.party_original(pid)
     assert {m["discord_id"] for m in original["members"]} == {str(i) for i in range(1, 9)}
-    run_async(parties.apply_swap(ctx, 100, pid, "1", "20", "tank", 9, reason_code="no_show", reason_text=""))
+    run_async(parties.apply_swap(ctx, 100, pid, "1", "20", "main_tank", 9, reason_code="no_show", reason_text=""))
     after = ctx.db.party_original(pid)
     assert after == original
     assert "20" in {m["discord_id"] for m in ctx.db.party_members(pid)}
@@ -166,17 +166,17 @@ def test_the_slot_prompt_skips_parties_that_already_have_their_button(ctx, make_
 
 def test_the_standby_pool_is_ticked_but_unseated_players(ctx, make_run, clock):
     run, pid, thread, chan = approved(ctx, make_run)
-    add_player(ctx, run, 30, ["dps"], 0, [S2])
-    add_player(ctx, run, 31, ["dps"], 0, ["2026-11-03T17:00"])
+    add_player(ctx, run, 30, ["melee"], 0, [S2])
+    add_player(ctx, run, 31, ["melee"], 0, ["2026-11-03T17:00"])
     slot = ctx.db.party(pid)["slot_id"]
     assert ctx.db.standby_pool(slot) == ["30"]
 
 
 def test_swap_updates_the_party_thread_standby_and_notifies_in_the_channel(ctx, make_run, clock):
     run, pid, thread, chan = approved(ctx, make_run)
-    add_player(ctx, run, 30, ["tank"], 0, [S2])
+    add_player(ctx, run, 30, ["main_tank"], 0, [S2])
     change, problems = run_async(parties.apply_swap(
-        ctx, 100, pid, "1", "30", "tank", 500, reason_code="no_show", reason_text=""))
+        ctx, 100, pid, "1", "30", "main_tank", 500, reason_code="no_show", reason_text=""))
     assert problems == []
     ids = {m["discord_id"] for m in ctx.db.party_members(pid)}
     assert "30" in ids and "1" not in ids
@@ -184,7 +184,7 @@ def test_swap_updates_the_party_thread_standby_and_notifies_in_the_channel(ctx, 
     assert ctx.db.standby_pool(slot) == ["1"]
     assert thread.removed == [1] and thread.added == [30]
     joined = next(m for m in thread.sent if "joins party 1" in (m["content"] or ""))
-    assert "<@30> joins party 1 as tank, replacing <@1>" in joined["content"]
+    assert "<@30> joins party 1 as Main tank, replacing <@1>" in joined["content"]
     assert joined["allowed_mentions"].users[0].id == 30                  # the new player is really pinged
     assert "<@30>" in thread.edits[-1]["content"] and "<@1>" not in thread.edits[-1]["content"]
     notice = chan.sent[-1]
@@ -196,8 +196,8 @@ def test_swap_updates_the_party_thread_standby_and_notifies_in_the_channel(ctx, 
 
 def test_why_was_i_swapped_reveals_the_reason_only_to_that_player_and_organizers(ctx, make_run, clock):
     run, pid, thread, chan = approved(ctx, make_run)
-    add_player(ctx, run, 30, ["tank"], 0, [S2])
-    change, _ = run_async(parties.apply_swap(ctx, 100, pid, "1", "30", "tank", 500, reason_code="other",
+    add_player(ctx, run, 30, ["main_tank"], 0, [S2])
+    change, _ = run_async(parties.apply_swap(ctx, 100, pid, "1", "30", "main_tank", 500, reason_code="other",
                                              reason_text="Please check your prog first"))
     swapped, other, org = player(1), player(2), organizer(user_id=500)
     for it in (swapped, other, org):
@@ -209,7 +209,7 @@ def test_why_was_i_swapped_reveals_the_reason_only_to_that_player_and_organizers
 
 def test_anyone_can_be_added_even_someone_who_never_signed_up(ctx, make_run, clock):
     run, pid, thread, chan = approved(ctx, make_run)
-    run_async(parties.apply_swap(ctx, 100, pid, "8", "777", "dps", 500, reason_code="cant_make_it", reason_text="",
+    run_async(parties.apply_swap(ctx, 100, pid, "8", "777", "caster", 500, reason_code="cant_make_it", reason_text="",
                                  in_name="Newcomer"))
     assert ctx.db.get_player("777")["display_name"] == "Newcomer"
 
@@ -217,24 +217,25 @@ def test_anyone_can_be_added_even_someone_who_never_signed_up(ctx, make_run, clo
 def test_the_warnings_cover_ticks_limits_roles_and_double_booking(ctx, make_run, clock):
     run, pid, thread, chan = approved(ctx, make_run)
     party = ctx.db.party(pid)
-    stranger = parties.swap_warnings(ctx, party, "777", "tank")
+    stranger = parties.swap_warnings(ctx, party, "777", "main_tank")
     assert any("not signed up" in w for w in stranger) and any("did not tick" in w for w in stranger)
-    add_player(ctx, run, 31, ["dps"], 0, ["2026-11-03T17:00"])
-    w = parties.swap_warnings(ctx, party, "31", "tank")
-    assert any("do not list tank" in x for x in w) and any("did not tick" in x for x in w)
-    seated = parties.swap_warnings(ctx, party, "2", "tank")              # player 2 is in this very party
+    add_player(ctx, run, 31, ["melee"], 0, ["2026-11-03T17:00"])
+    w = parties.swap_warnings(ctx, party, "31", "main_tank")
+    assert any("do not list Main tank" in x for x in w) and any("did not tick" in x for x in w)
+    seated = parties.swap_warnings(ctx, party, "2", "main_tank")              # player 2 is in this very party
     assert any("already in party 1 of this same slot" in x for x in seated)
-    assert parties.comp_warnings(ctx, party, {"1": None, "31": "dps"}) == [
-        "The roles would be 1 tank, 2 healer, 5 dps instead of 2 tank, 2 healer, 4 dps."]
-    assert parties.comp_warnings(ctx, party, {"1": None, "31": "tank"}) == []
+    assert parties.comp_warnings(ctx, party, {"1": None, "31": "melee"}) == [
+        "The roles would be 0 Main tank, 1 Off tank, 1 Regen healer, 1 Shield healer, 3 Melee, 1 Ranged, 1 Caster "
+        "instead of 1 Main tank, 1 Off tank, 1 Regen healer, 1 Shield healer, 2 Melee, 1 Ranged, 1 Caster."]
+    assert parties.comp_warnings(ctx, party, {"1": None, "31": "main_tank"}) == []
 
 
 def test_the_limit_warnings(ctx, make_run, clock):
     run, pid, thread, chan = approved(ctx, make_run, (S2, "2026-11-02T20:00"))
-    add_player(ctx, run, 40, ["tank"], 0, [S2, "2026-11-02T20:00"], per_day=1, per_run=1)
+    add_player(ctx, run, 40, ["main_tank"], 0, [S2, "2026-11-02T20:00"], per_day=1, per_run=1)
     second = ctx.db.parties(run["id"])[1]
-    run_async(parties.apply_swap(ctx, 100, pid, "1", "40", "tank", 500, reason_code="no_show", reason_text=""))
-    w = parties.swap_warnings(ctx, ctx.db.party(second["id"]), "40", "tank")
+    run_async(parties.apply_swap(ctx, 100, pid, "1", "40", "main_tank", 500, reason_code="no_show", reason_text=""))
+    w = parties.swap_warnings(ctx, ctx.db.party(second["id"]), "40", "main_tank")
     assert any("their max is 1" in x and "today" in x for x in w) and any("of the run" in x for x in w)
 
 
@@ -245,8 +246,8 @@ def test_swapping_after_the_party_ended_keeps_play_logs_right_and_drops_the_old_
     slot = ctx.db.party(pid)["slot_id"]
     ctx.db.add_vote(run["id"], slot, "1", "2", "like", clock["now"])
     ctx.db.add_vote(run["id"], slot, "2", "3", "like", clock["now"])
-    add_player(ctx, run, 30, ["tank"], 0, [S2])
-    run_async(parties.apply_swap(ctx, 100, pid, "1", "30", "tank", 500, reason_code="no_show", reason_text=""))
+    add_player(ctx, run, 30, ["main_tank"], 0, [S2])
+    run_async(parties.apply_swap(ctx, 100, pid, "1", "30", "main_tank", 500, reason_code="no_show", reason_text=""))
     logs = {r["discord_id"]: r["minutes"] for r in ctx.db.conn.execute("SELECT * FROM play_log")}
     assert "1" not in logs and logs["30"] == 40 and len(logs) == 8
     votes = ctx.db.conn.execute("SELECT voter_id, target_id FROM votes").fetchall()
@@ -256,12 +257,12 @@ def test_swapping_after_the_party_ended_keeps_play_logs_right_and_drops_the_old_
 
 def test_a_failing_thread_step_is_reported_but_the_swap_stands(ctx, make_run, clock):
     run, pid, thread, chan = approved(ctx, make_run)
-    add_player(ctx, run, 30, ["tank"], 0, [S2])
+    add_player(ctx, run, 30, ["main_tank"], 0, [S2])
 
     async def deny(user):
         raise RuntimeError("Missing Permissions")
     thread.remove_user = deny
-    _, problems = run_async(parties.apply_swap(ctx, 100, pid, "1", "30", "tank", 500, reason_code="no_show",
+    _, problems = run_async(parties.apply_swap(ctx, 100, pid, "1", "30", "main_tank", 500, reason_code="no_show",
                                                reason_text=""))
     assert any("Manage Threads" in p for p in problems)
     assert "30" in {m["discord_id"] for m in ctx.db.party_members(pid)}
@@ -282,7 +283,7 @@ def test_the_panel_is_for_organizers_only(ctx, make_run, clock):
 
 def test_a_swap_with_warnings_needs_a_second_confirmation(ctx, make_run, clock):
     run, pid, thread, chan = approved(ctx, make_run)
-    add_player(ctx, run, 31, ["dps"], 0, ["2026-11-03T17:00"])           # did not tick this slot
+    add_player(ctx, run, 31, ["melee"], 0, ["2026-11-03T17:00"])           # did not tick this slot
     panel = party_views.EditPartyView(ctx, pid, "500")
     panel.out_id, panel.in_id, panel.in_name, panel.reason_code = "8", "31", "P31", "cant_make_it"
     modal = party_views.SwapModal(panel)
@@ -301,7 +302,7 @@ def test_a_swap_with_warnings_needs_a_second_confirmation(ctx, make_run, clock):
 
 def test_a_clean_swap_needs_no_confirmation_and_other_needs_text(ctx, make_run, clock):
     run, pid, thread, chan = approved(ctx, make_run)
-    add_player(ctx, run, 30, ["dps"], 0, [S2])
+    add_player(ctx, run, 30, ["caster"], 0, [S2])
     panel = party_views.EditPartyView(ctx, pid, "500")
     panel.out_id, panel.in_id, panel.in_name, panel.reason_code = "8", "30", "P30", "other"
     modal = party_views.SwapModal(panel)
@@ -355,14 +356,14 @@ def test_export_has_the_members_and_the_solvers_original(ctx, make_run, clock):
 
 def test_import_swaps_with_reasons_and_records_the_source(ctx, make_run, clock):
     run, pid, thread, chan = approved(ctx, make_run)
-    add_player(ctx, run, 30, ["dps"], 0, [S2])
+    add_player(ctx, run, 30, ["caster"], 0, [S2])
     data = parties.party_json(ctx, pid)
     for m in data["members"]:
         if m["player"] == "8":
             m["player"] = "30"
     data["reasons"] = {"8": {"code": "no_show", "text": ""}}
     it = do_import(ctx, FakeAttachment(json.dumps(data).encode()))
-    assert "✅ <@8> → <@30> as dps" in it.text
+    assert "✅ <@8> → <@30> as Caster" in it.text
     c = ctx.db.party_changes(pid)[-1]
     assert c["reason_code"] == "no_show" and json.loads(c["detail_json"])["source"] == "import"
     assert "<@8> you were swapped out" in chan.sent[-1]["content"]
@@ -370,7 +371,7 @@ def test_import_swaps_with_reasons_and_records_the_source(ctx, make_run, clock):
 
 def test_import_refuses_removals_without_a_reason_and_unforced_warnings(ctx, make_run, clock):
     run, pid, thread, chan = approved(ctx, make_run)
-    add_player(ctx, run, 31, ["dps"], 0, ["2026-11-03T17:00"])
+    add_player(ctx, run, 31, ["melee"], 0, ["2026-11-03T17:00"])
     data = parties.party_json(ctx, pid)
     for m in data["members"]:
         if m["player"] == "8":
@@ -389,10 +390,10 @@ def test_import_refuses_removals_without_a_reason_and_unforced_warnings(ctx, mak
 def test_import_handles_role_changes_bad_files_and_non_organizers(ctx, make_run, clock):
     run, pid, thread, chan = approved(ctx, make_run)
     data = parties.party_json(ctx, pid)
-    data["members"][0]["role"] = "healer"
+    data["members"][0]["role"] = "regen"
     data["force"] = True
     it = do_import(ctx, FakeAttachment(json.dumps(data).encode()))
-    assert "is now healer" in it.text and ctx.db.party_changes(pid)[-1]["kind"] == "role"
+    assert "is now Regen healer" in it.text and ctx.db.party_changes(pid)[-1]["kind"] == "role"
     assert "not valid JSON" in do_import(ctx, FakeAttachment(b"nope")).text
     assert "not a party export" in do_import(ctx, FakeAttachment(b"[1]")).text
     assert "Nothing differs" in do_import(ctx, edited(ctx, pid)).text
@@ -406,7 +407,7 @@ def test_import_handles_role_changes_bad_files_and_non_organizers(ctx, make_run,
 
 def test_a_slow_swap_answers_discord_first_so_the_interaction_cannot_expire(ctx, make_run, clock):
     run, pid, thread, chan = approved(ctx, make_run)
-    add_player(ctx, run, 30, ["dps"], 0, [S2])
+    add_player(ctx, run, 30, ["caster"], 0, [S2])
     panel = party_views.EditPartyView(ctx, pid, "500")
     panel.out_id, panel.in_id, panel.in_name = "8", "30", "P30"
     modal = party_views.SwapModal(panel)
@@ -430,11 +431,11 @@ def test_a_slow_swap_answers_discord_first_so_the_interaction_cannot_expire(ctx,
 def test_a_user_discord_does_not_know_is_not_reported_as_a_problem(ctx, make_run, clock):
     import discord
     run, pid, thread, chan = approved(ctx, make_run)
-    add_player(ctx, run, 30, ["tank"], 0, [S2])
+    add_player(ctx, run, 30, ["main_tank"], 0, [S2])
 
     async def unknown(user):
         raise discord.NotFound(type("R", (), {"status": 404, "reason": "Not Found"})(), "Unknown User")
     thread.remove_user = unknown
-    _, problems = run_async(parties.apply_swap(ctx, 100, pid, "1", "30", "tank", 500, reason_code="no_show",
+    _, problems = run_async(parties.apply_swap(ctx, 100, pid, "1", "30", "main_tank", 500, reason_code="no_show",
                                                reason_text=""))
     assert problems == []

@@ -9,7 +9,7 @@ from bot import handlers
 from bot.db import split_roles
 from bot.solver_io import build_signups, import_draft
 from bot.views import AvailabilityView, DoneButton, LimitsButton
-from conftest import (add_party_players, draft_for_day, NOW, ORGANIZER_ROLE_ID, SLOT, FakeAttachment, add_player, draft_for, fill_one_party,
+from conftest import (pick_roles, add_party_players, draft_for_day, NOW, ORGANIZER_ROLE_ID, SLOT, FakeAttachment, add_player, draft_for, fill_one_party,
                       organizer, player, run_async)
 
 
@@ -137,7 +137,7 @@ def test_open_and_close_lifecycle(ctx, make_run):
     second = make_run("Second", status="draft")
     assert "still open" in do(ctx, handlers.run_open, organizer(), "Second").text
 
-    add_player(ctx, run, 1, ["dps"], 0, [SLOT])
+    add_player(ctx, run, 1, ["melee"], 0, [SLOT])
     it = do(ctx, handlers.run_close, organizer())              # newest run is "Second", which is not open
     assert "is not open" in it.text
     it = do(ctx, handlers.run_close, organizer(), "UWU week 1")
@@ -160,7 +160,7 @@ def test_run_status_shows_the_heatmap(ctx, make_run):
     run = make_run()
     fill_one_party(ctx, run, SLOT)
     it = do(ctx, handlers.run_status, organizer())
-    assert "8 players have ticked slots" in it.text and "17:00   2  2  4    8  ✓ ~1" in it.text
+    assert "8 players have ticked slots" in it.text and "17:00   1  1  1  1  2  1  1    8  ✓ ~1" in it.text
     assert it.response.sent[0]["ephemeral"] is True
     assert "Days look like" in do(ctx, handlers.run_status, organizer(), None, "bad").text
 
@@ -169,7 +169,7 @@ def test_run_status_sends_extra_messages_for_long_runs(ctx, make_run):
     from datetime import date
     run = make_run("Long", start=date(2026, 11, 1), end=date(2026, 11, 14))
     keys = [s["slot_key"] for s in ctx.db.run_slots(run["id"])]
-    add_player(ctx, run, 1, ["dps"], 0, keys)
+    add_player(ctx, run, 1, ["melee"], 0, keys)
     it = do(ctx, handlers.run_status, organizer())
     assert len(it.response.sent) == 1 and len(it.followup.sent) >= 1
     assert all(m["ephemeral"] for m in it.followup.sent)
@@ -204,16 +204,15 @@ def test_menu_saves_every_click(ctx, make_run):
         msg = it.response.sent[0]
         view = msg["view"]
         assert isinstance(view, AvailabilityView) and msg["ephemeral"] is True
-        assert len(view.children) == 9           # 3 role toggles, Limits, Done, prog, day, character, slots
+        assert len(view.children) == 7           # Roles, Limits, Done, prog, day, character, slots
         assert [o.value for o in view.prog_select.options] == [str(i) for i in range(20)]
         assert [o.value for o in view.day_select.options] == ["2026-11-01", "2026-11-02", "2026-11-03"]
         assert "⚠ Set your roles and prog" in msg["content"] and msg["content"].count("<t:") == 4   # the picked day's cutoff plus one per day
 
-        tank, healer, dps = view.role_buttons
-        for button in (dps, tank):                            # role buttons toggle; green = on
-            await button.callback(player(5))
-        assert split_roles(ctx.db.get_player(5)["roles"]) == ["tank", "dps"]
-        assert [b.style == discord.ButtonStyle.success for b in view.role_buttons] == [True, False, True]
+        assert view.roles_button.style == discord.ButtonStyle.secondary
+        await pick_roles(view, player(5), ["melee", "main_tank"])        # the Roles modal; green once any role is set
+        assert split_roles(ctx.db.get_player(5)["roles"]) == ["main_tank", "melee"]
+        assert view.roles_button.style == discord.ButtonStyle.success and view.roles_button.label == "Roles (2)"
 
         view.prog_select._values = ["11"]
         await view.prog_select.callback(player(5))
@@ -305,7 +304,7 @@ def test_menu_stops_saving_after_the_deadline(ctx, make_run, clock):
         view = it.response.sent[0]["view"]
         clock["now"] = NOW + timedelta(days=10)                 # deadline passes while the menu is open
         late = player(5)
-        await view.role_buttons[0].callback(late)
+        await view.roles_button.callback(late)
         assert "closed for every day" in late.text and late.response.edits[-1]["view"] is None
         assert ctx.db.get_player(5)["roles"] == ""
     run_async(scenario())
@@ -343,17 +342,17 @@ def test_myschedule_shows_ticks_and_only_confirmed_parties(ctx, make_run):
     run = make_run()
     ids = fill_one_party(ctx, run, SLOT)
     it = do(ctx, handlers.myschedule, player(1))
-    assert "Slots you ticked (1)" in it.text and "<t:" in it.text and "Roles: tank" in it.text
+    assert "Slots you ticked (1)" in it.text and "<t:" in it.text and "Roles: Main tank" in it.text
     assert "confirmed parties" not in it.text
 
     import_draft(ctx.db, run, draft_for(ctx, run, [str(i) for i in ids]), ctx.cfg)
     it = do(ctx, handlers.myschedule, player(1))
-    assert "draft is with the organizers" in it.text and "as tank" not in it.text      # drafts stay private
+    assert "draft is with the organizers" in it.text and "as Main tank" not in it.text      # drafts stay private
 
     with ctx.db.conn:
         ctx.db.conn.execute("UPDATE parties SET status = 'confirmed'")
     it = do(ctx, handlers.myschedule, player(1))
-    assert "Your confirmed parties" in it.text and "as tank" in it.text
+    assert "Your confirmed parties" in it.text and "as Main tank" in it.text
 
 
 def test_myschedule_without_runs(ctx):
