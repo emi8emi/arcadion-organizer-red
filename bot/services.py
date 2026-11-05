@@ -12,7 +12,7 @@ from .grid import GridConfig
 from .characters import characters_line
 
 MAX_PER_DAY = 8
-MAX_PER_RUN = 40
+MAX_PER_RUN = 99
 
 
 @dataclass
