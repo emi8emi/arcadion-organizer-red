@@ -16,7 +16,7 @@ from . import confirmations as cf
 from . import progscore
 from .fflogs import FFLogsError
 from . import heatmap
-from .config import ROOT
+from .config import ROOT, role_label
 from .db import DraftConflict, DuplicateRun, parse_iso
 from .grid import day_cutoff, parse_date, parse_hm, parse_local_datetime, run_slots
 from .services import (snapshot_note, cutoff_of, day_label, day_state, day_summary_lines, limits_text, locked_prog_lines, open_days,
@@ -351,7 +351,7 @@ async def myschedule(ctx, interaction):
         for p in mine:
             when = discord.utils.format_dt(parse_iso(p["start_utc"]), "F")
             char = ctx.db.chosen_character(run["id"], p["slot_key"][:10], uid)
-            lines.append(f"• {when} as {p['role']}" + (f" ({ch.label(char)})" if char else ""))
+            lines.append(f"• {when} as {role_label(p['role'])}" + (f" ({ch.label(char)})" if char else ""))
     elif ctx.db.parties(run["id"]):
         lines.append("A draft is with the organizers; your parties show up here once they are confirmed.")
     await say(interaction, "\n".join(lines)[:1990])
@@ -917,12 +917,12 @@ async def party_import(ctx, interaction, party_file):
             except ValueError:
                 lines.append(f"⚠ Could not swap <@{op['out']}>: the party changed meanwhile.")
                 continue
-            lines.append(f"✅ <@{op['out']}> → <@{op['in']}> as {op['role']}")
+            lines.append(f"✅ <@{op['out']}> → <@{op['in']}> as {role_label(op['role'])}")
             lines += ["⚠ " + p for p in problems]
         else:
             ctx.db.set_member_role(party_id, op["player"], op["role"], interaction.user.id, now,
                                    warnings=warnings or None, source="import")
-            lines.append(f"✅ <@{op['player']}> is now {op['role']}")
+            lines.append(f"✅ <@{op['player']}> is now {role_label(op['role'])}")
     from .parties import refresh_party_message
     await refresh_party_message(ctx, party_id)
     await say(interaction, "\n".join(lines)[:1990])

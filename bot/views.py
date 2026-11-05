@@ -2,7 +2,7 @@
 import discord
 
 from . import characters as ch
-from .config import ROLES
+from .config import ROLES, role_label
 from .db import parse_iso, split_roles
 from .votes import cast_vote, current_rating, time_reason
 from .services import (checkpoint_label, clip_message, day_accepts_signups, day_label, day_state, cutoff_of,
@@ -20,14 +20,15 @@ class AvailabilityView(discord.ui.View):
         self.day = next((d["day"] for d in ctx.db.run_days(run["id"])
                          if day_accepts_signups(ctx, run, d)), self.days[0])     # first day still open
 
-        # Discord allows 5 rows, and a select takes a whole row, so roles are toggle buttons that share row 0
-        # with Limits and Done. Rows 1-4: prog, day, the character for that day, the day's slots.
-        self.role_buttons = [RoleButton(r) for r in ROLES]
+        # Discord allows 5 rows, and a select takes a whole row. Seven roles do not fit as buttons, so one Roles
+        # button (a modal with a multi-select) shares row 0 with Limits and Done.
+        # Rows 1-4: prog, day, the character for that day, the day's slots.
+        self.roles_button = RolesButton()
         self.prog_select = ProgSelect()
         self.day_select = DaySelect()
         self.character_select = CharacterSelect()
         self.slot_select = SlotSelect()
-        for item in (*self.role_buttons, LimitsButton(), DoneButton(), self.prog_select, self.day_select,
+        for item in (self.roles_button, LimitsButton(), DoneButton(), self.prog_select, self.day_select,
                      self.character_select, self.slot_select):
             self.add_item(item)
         self.sync()
@@ -46,8 +47,8 @@ class AvailabilityView(discord.ui.View):
         prog = player["prog_index"] if player else None
         ticked = set(db.ticked_keys(self.run_id, self.user_id))
 
-        for b in self.role_buttons:
-            b.style = discord.ButtonStyle.success if b.role in roles else discord.ButtonStyle.secondary
+        self.roles_button.label = f"Roles ({len(roles)})" if roles else "Roles"
+        self.roles_button.style = discord.ButtonStyle.success if roles else discord.ButtonStyle.secondary
         self.prog_select.options = [
             discord.SelectOption(label=checkpoint_label(self.checkpoints, c["idx"])[:100], value=str(c["idx"]),
                                  default=(c["idx"] == prog)) for c in self.checkpoints[:25]]
@@ -169,25 +170,42 @@ class AvailabilityView(discord.ui.View):
         return str(interaction.user.id) == self.user_id
 
 
-class RoleButton(discord.ui.Button):
-    """One toggle per role: green = you can play it. At least one role stays on."""
+class RolesButton(discord.ui.Button):
+    """Opens the roles modal. Green once at least one role is set."""
 
-    def __init__(self, role):
-        super().__init__(label="DPS" if role == "dps" else role.capitalize(), style=discord.ButtonStyle.secondary,
-                         row=0)
-        self.role = role
+    def __init__(self):
+        super().__init__(label="Roles", style=discord.ButtonStyle.secondary, row=0)
 
     async def callback(self, interaction):
         v = self.view
-        if not await v.guard(interaction):
-            return
-        player = v.ctx.db.get_player(v.user_id)
-        roles = set(split_roles(player["roles"]) if player else [])
-        roles = roles - {self.role} if self.role in roles else roles | {self.role}
+        if await v.guard(interaction):
+            await interaction.response.send_modal(RolesModal(v))
+
+
+class RolesModal(discord.ui.Modal):
+    """Every role the player can play (flex players pick several). At least one stays selected."""
+
+    def __init__(self, view):
+        super().__init__(title="Roles you can play")
+        self.owner = view
+        player = view.ctx.db.get_player(view.user_id)
+        have = set(split_roles(player["roles"]) if player else [])
+        self.select = discord.ui.Select(
+            min_values=1, max_values=len(ROLES),
+            options=[discord.SelectOption(label=role_label(r), value=r, default=r in have) for r in ROLES])
+        self.add_item(discord.ui.Label(
+            text="Roles", component=self.select,
+            description="A party has 1 main tank, 1 off tank, 1 regen, 1 shield, 2 melee, 1 ranged, 1 caster."))
+
+    async def on_submit(self, interaction):
+        v = self.owner
+        roles = {r for r in self.select.values if r in ROLES}
         if not roles:
-            return await v.refresh(interaction, extra="\n⚠ Keep at least one role on.")
-        v.ctx.db.upsert_player(v.user_id, v.display_name, roles=sorted(roles), now=v.ctx.now())
-        await v.refresh_after_edit(interaction)
+            await interaction.response.send_message("Keep at least one role.", ephemeral=True)
+            return
+        if await v.guard(interaction):
+            v.ctx.db.upsert_player(v.user_id, v.display_name, roles=sorted(roles), now=v.ctx.now())
+            await v.refresh_after_edit(interaction)
 
 
 class ProgSelect(discord.ui.Select):
@@ -392,7 +410,7 @@ class RateView(discord.ui.View):
         self.buttons = []
         for i, m in enumerate(self.members):
             name = (ctx.db.get_player(m["discord_id"]) or {"display_name": "Player"})["display_name"]
-            button = MemberRateButton(m["discord_id"], f"{name} · {m['role']}"[:80], row=i // 5)
+            button = MemberRateButton(m["discord_id"], f"{name} · {role_label(m['role'])}"[:80], row=i // 5)
             self.buttons.append(button)
             self.add_item(button)
         self.add_item(RateDoneButton())

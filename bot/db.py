@@ -51,12 +51,23 @@ class DB:
         self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
+        self._refuse_old_roles(path)
         self._park_old_votes()
         self.conn.executescript(SCHEMA_PATH.read_text())
         self._migrate()
         self.conn.commit()
         from .progscore import sync_fights               # fights + checkpoints come from the prog point files
         sync_fights(self, prog_dir or PROG_POINTS_DIR)
+
+    def _refuse_old_roles(self, path):
+        """Parties are now seven roles (main tank, off tank, regen, shield, melee, ranged, caster). A database
+        made with tank/healer/dps has a CHECK that SQLite cannot alter in place, so stop with a clear message."""
+        row = self.conn.execute("SELECT sql FROM sqlite_master WHERE name = 'party_members'").fetchone()
+        if row and "'main_tank'" not in row["sql"]:
+            self.conn.close()
+            raise RuntimeError(
+                f"{path} was made with the old tank/healer/dps roles, which this version cannot read. "
+                "Move that file aside (or delete it) and start again with a fresh database.")
 
     def _park_old_votes(self):
         """Early skeletons had an unused `votes` table (yes/neutral/no, one row per slot and pair).

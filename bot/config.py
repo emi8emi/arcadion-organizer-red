@@ -3,7 +3,24 @@ import json
 import os
 from pathlib import Path
 
-ROLES = ("tank", "healer", "dps")
+# The seven seats of a party: two tanks (main and off), two healers (regen and shield), four DPS (two melee,
+# one ranged, one caster). Players pick every role they can play; the solver fills exactly one seat per role below.
+ROLES = ("main_tank", "off_tank", "regen", "shield", "melee", "ranged", "caster")
+ROLE_LABELS = {"main_tank": "Main tank", "off_tank": "Off tank", "regen": "Regen healer", "shield": "Shield healer",
+               "melee": "Melee", "ranged": "Ranged", "caster": "Caster"}
+ROLE_SHORT = {"main_tank": "MT", "off_tank": "OT", "regen": "RG", "shield": "SH",
+              "melee": "ML", "ranged": "RN", "caster": "CS"}
+
+
+def role_label(role):
+    return ROLE_LABELS.get(role, role)
+
+
+def parse_role(text):
+    """'Main tank', 'main-tank' or 'MAIN_TANK' -> 'main_tank'; None if it is not one of ROLES."""
+    key = "_".join((text or "").strip().lower().replace("-", " ").replace("_", " ").split())
+    return key if key in ROLES else None
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -16,7 +33,7 @@ DEFAULTS = {
     "default_max_per_day": 2,
     "default_max_per_run": 4,
     "max_run_days": 14,
-    "party": {"tank": 2, "healer": 2, "dps": 4},
+    "party": {"main_tank": 1, "off_tank": 1, "regen": 1, "shield": 1, "melee": 2, "ranged": 1, "caster": 1},
     "solver_phase_cross_cost": 3,   # must equal phase_cross_cost in raid-solver/config.json
     "cutoff_time": "23:59",          # each day's signups close at this local time ...
     "cutoff_days_before": 1,         # ... this many days before the day (1 = the evening before)

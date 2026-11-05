@@ -32,7 +32,7 @@ def two_parties(ctx, make_run):
     run = make_run(per_day=True)
     a = add_party_players(ctx, run, [S2], first_id=1)
     b = add_party_players(ctx, run, [S2B], first_id=9)
-    roles = ["tank"] * 2 + ["healer"] * 2 + ["dps"] * 4
+    roles = ["main_tank", "off_tank", "regen", "shield", "melee", "melee", "ranged", "caster"]
     parties = [{"slot_key": slot, "party_index": 0, "target_idx": 0,
                 "members": [{"discord_id": i, "role": r, "helper": False, "placed_down": False, "distance": 0}
                             for i, r in zip(ids, roles)]} for slot, ids in ((S2, a), (S2B, b))]
@@ -322,7 +322,7 @@ def test_the_select_shows_my_current_rating_per_member(ctx, make_run, clock):
         import discord
         assert view.ratings["3"] == "dislike" and view.ratings["2"] == "neutral"
         b3 = next(b for b in view.buttons if b.target_id == "3")
-        assert b3.label == "Player 3 · healer" and str(b3.emoji) == "👎" and b3.style == discord.ButtonStyle.danger
+        assert b3.label == "Player 3 · Regen healer" and str(b3.emoji) == "👎" and b3.style == discord.ButtonStyle.danger
     run_async(scenario())
 
 
@@ -429,7 +429,7 @@ def test_rating_strings_and_components_respect_discords_limits(ctx, make_run, cl
     ids = add_party_players(ctx, run, [S2])
     for i in ids:
         ctx.db.upsert_player(i, long[:-len(i)] + i)                  # 32-character display names
-    roles = ["tank"] * 2 + ["healer"] * 2 + ["dps"] * 4
+    roles = ["main_tank", "off_tank", "regen", "shield", "melee", "melee", "ranged", "caster"]
     ctx.db.replace_draft(run["id"], [{"slot_key": S2, "party_index": 0, "target_idx": 18, "members": [
         {"discord_id": i, "role": r, "helper": False, "placed_down": False, "distance": 0} for i, r in zip(ids, roles)]}],
         [], D2)

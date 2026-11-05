@@ -6,7 +6,7 @@ import logging
 
 import discord
 
-from .config import ROLES
+from .config import ROLES, role_label
 from .db import parse_iso
 from .services import checkpoint_label, day_label
 from .votes import slot_end, window_closes
@@ -33,7 +33,7 @@ def party_message(run, slot, party, members, checkpoints, characters=None):
         if characters is not None:
             c = characters.get(m["discord_id"])
             who = f" · {c['name']} @ {c['world']}" if c else " · no character"
-        lines.append(f"• <@{m['discord_id']}> {m['role']}{who}{marks}")
+        lines.append(f"• <@{m['discord_id']}> {role_label(m['role'])}{who}{marks}")
     if party["ended_utc"]:
         lines.append(f"✅ Ended {discord.utils.format_dt(parse_iso(party['ended_utc']), 't')}")
     return "\n".join(lines)

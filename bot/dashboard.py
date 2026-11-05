@@ -12,6 +12,7 @@ import discord
 from . import confirmations as cf
 from .confirmations import MARKS
 from .db import parse_iso
+from .config import ROLES, role_label
 from .services import day_label
 from .votes import slot_end
 
@@ -115,10 +116,10 @@ def overview_text(run, day, rows, only_attention):
 
 def detail_text(run, row):
     lines = [row_line(row)]
-    order = {"tank": 0, "healer": 1, "dps": 2}
+    order = {r: i for i, r in enumerate(ROLES)}
     for m in sorted(row["members"], key=lambda m: (order[m["role"]], m["discord_id"])):
         have = row["have"].get(m["discord_id"])
-        lines.append(f"{MARKS[have['status'] if have else None]} <@{m['discord_id']}> {m['role']}"
+        lines.append(f"{MARKS[have['status'] if have else None]} <@{m['discord_id']}> {role_label(m['role'])}"
                      + (f" · {cf.cancel_label(have['reason_code'], have['reason_text'])}"
                         if have and have["status"] == "declined" else ""))
     lines += [f"{DOT[lvl]} {text}" for lvl, text in sorted(row["issues"], reverse=True)]

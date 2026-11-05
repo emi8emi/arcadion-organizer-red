@@ -8,7 +8,7 @@
   "default_max_per_run": 99,
   "max_run_days": 14,
 
-  "party": {"tank": 2, "healer": 2, "dps": 4},
+  "party": {"main_tank": 1, "off_tank": 1, "regen": 1, "shield": 1, "melee": 2, "ranged": 1, "caster": 1},
 
   "solver_phase_cross_cost": 3,
 

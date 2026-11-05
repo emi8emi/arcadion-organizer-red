@@ -4,7 +4,9 @@ from datetime import timedelta
 import discord
 
 from bot import handlers
-from conftest import NOW, player, run_async
+from bot.config import ROLES
+from bot.views import RolesModal
+from conftest import NOW, pick_roles, player, run_async
 
 
 async def open_menu(ctx, uid=5):
@@ -27,28 +29,28 @@ def test_the_menu_fits_discords_five_rows(ctx, make_run):
     rows = {}
     for c in view.children:
         rows.setdefault(c.row, []).append(c)
-    assert sorted(rows) == [0, 1, 2, 3, 4] and len(rows[0]) == 5
+    assert sorted(rows) == [0, 1, 2, 3, 4] and len(rows[0]) == 3
     assert all(len(rows[i]) == 1 for i in (1, 2, 3, 4))
     view.to_components()                                   # Discord's own layout check
 
 
-def test_role_buttons_toggle_and_keep_one_on(ctx, make_run):
+def test_roles_modal_saves_every_pick_and_keeps_one_on(ctx, make_run):
     make_run()
 
     async def scenario():
         it = player(5)
         await handlers.availability(ctx, it)
         view = it.response.sent[0]["view"]
-        tank, healer, dps = view.role_buttons
-        for b in (dps, tank):
-            await b.callback(player(5))
-        assert ctx.db.get_player(5)["roles"] == "tank,dps"
-        assert [b.style for b in view.role_buttons] == [discord.ButtonStyle.success, discord.ButtonStyle.secondary,
-                                                        discord.ButtonStyle.success]
-        await tank.callback(player(5))
+        await pick_roles(view, player(5), ["caster", "main_tank", "regen"])
+        assert ctx.db.get_player(5)["roles"] == "main_tank,regen,caster"          # fixed role order
+        assert view.roles_button.label == "Roles (3)" and "Main tank, Regen healer, Caster" in view.render()
+        modal = RolesModal(view)                                  # reopened: the saved roles are preselected
+        assert [o.value for o in modal.select.options if o.default] == ["main_tank", "regen", "caster"]
+        assert [o.value for o in modal.select.options] == list(ROLES)
         last = player(5)
-        await dps.callback(last)                           # the last role cannot be switched off
-        assert ctx.db.get_player(5)["roles"] == "dps" and "at least one role" in last.text
+        modal.select._values = []                                  # the last role cannot be switched off
+        await modal.on_submit(last)
+        assert ctx.db.get_player(5)["roles"] == "main_tank,regen,caster" and "at least one role" in last.text.lower()
     run_async(scenario())
 
 

@@ -36,7 +36,7 @@ def test_export_has_the_shape_the_solver_reads(ctx, world):
     p = data["players"][0]
     assert set(p) == {"id", "name", "roles", "helper", "prog", "max_per_day", "max_per_run", "drop",
                       "unmatched_last_run", "available"}
-    assert p["id"] == "1" and p["roles"] == ["tank"] and p["available"] == [SLOT]
+    assert p["id"] == "1" and p["roles"] == ["main_tank"] and p["available"] == [SLOT]
     assert p["drop"] == {"opt_in": False, "max_drop": 0}
 
 
@@ -82,7 +82,7 @@ def test_drop_distance_uses_phase_aware_units(ctx):
 
 def test_opted_in_drop_is_exported_in_solver_units(ctx, make_run):
     run = make_run()
-    add_player(ctx, run, 1, ["dps"], 9, [SLOT], drop=1)
+    add_player(ctx, run, 1, ["melee"], 9, [SLOT], drop=1)
     data, _ = build_signups(ctx.db, run, ctx.cfg)
     assert data["players"][0]["drop"] == {"opt_in": True, "max_drop": 4}
 
@@ -90,13 +90,13 @@ def test_opted_in_drop_is_exported_in_solver_units(ctx, make_run):
 def test_unmatched_last_run_flag_comes_from_the_previous_run(ctx, make_run):
     old = make_run("Old", status="closed")
     ids = fill_one_party(ctx, old, SLOT)
-    add_player(ctx, old, 99, ["dps"], 0, ["2026-11-02T20:00"])
+    add_player(ctx, old, 99, ["melee"], 0, ["2026-11-02T20:00"])
     draft = draft_for(ctx, old, [str(i) for i in ids])
     import_draft(ctx.db, old, draft, ctx.cfg)
     confirm(ctx, old)
     new = make_run("New")
-    add_player(ctx, new, 99, ["dps"], 0, [SLOT])
-    add_player(ctx, new, 1, ["tank"], 0, [SLOT])
+    add_player(ctx, new, 99, ["melee"], 0, [SLOT])
+    add_player(ctx, new, 1, ["main_tank"], 0, [SLOT])
     flags = {p["id"]: p["unmatched_last_run"] for p in build_signups(ctx.db, new, ctx.cfg)[0]["players"]}
     assert flags == {"1": False, "99": True}
 
@@ -171,9 +171,9 @@ def test_import_refuses_a_draft_for_another_run(ctx, world, make_run):
     (lambda d: d.pop("input_fingerprint"), "does not look like"),
     (lambda d: d["parties"][0].update(slot="2026-11-02T03:00"), "unknown slot"),
     (lambda d: d["parties"][0]["members"].pop(), "roles do not match"),
-    (lambda d: d["parties"][0]["members"][0].update(role="dps"), "roles do not match"),
+    (lambda d: d["parties"][0]["members"][0].update(role="melee"), "roles do not match"),
     (lambda d: d["parties"][0]["members"][0].update(player="12345"), "not in the current signups"),
-    (lambda d: d["parties"][0]["members"][2].update(role="tank"), "roles do not match"),
+    (lambda d: d["parties"][0]["members"][2].update(role="main_tank"), "roles do not match"),
     (lambda d: d["parties"][0]["target"].update(index=99), "bad target"),
     (lambda d: d["parties"].append(copy.deepcopy(d["parties"][0])), "appears twice"),
 ])
@@ -188,7 +188,7 @@ def test_import_refuses_drafts_that_break_the_signups(ctx, world, mutate, messag
 
 def test_import_refuses_a_player_in_a_slot_they_did_not_tick(ctx, world):
     run, ids = world
-    add_player(ctx, run, 60, ["tank"], 0, ["2026-11-02T20:00"])           # ticked another slot only
+    add_player(ctx, run, 60, ["main_tank"], 0, ["2026-11-02T20:00"])           # ticked another slot only
     draft = draft_for(ctx, run, ids)
     draft["input_fingerprint"] = fingerprint(build_signups(ctx.db, run, ctx.cfg)[0])
     draft["parties"][0]["members"][0]["player"] = "60"

@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 import discord
 
+from .config import role_label
 from .db import DB, parse_iso, split_roles
 from .grid import GridConfig
 from .characters import characters_line
@@ -132,7 +133,7 @@ def profile_text(ctx, run, discord_id):
     cps = ctx.db.checkpoints(run["fight_id"])
     roles = split_roles(player["roles"]) if player else []
     prog = player["prog_index"] if player else None
-    lines = [f"Roles: {', '.join(roles) if roles else 'not set'} · Prog: {checkpoint_label(cps, prog)}",
+    lines = [f"Roles: {', '.join(role_label(r) for r in roles) if roles else 'not set'} · Prog: {checkpoint_label(cps, prog)}",
              limits_text(ctx.db.get_limits(run["id"], discord_id, ctx.cfg))]
     lines.append(characters_line(ctx.db, discord_id))
     if not roles or prog is None:

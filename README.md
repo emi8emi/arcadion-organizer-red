@@ -38,8 +38,8 @@ Nothing is solved automatically: at each cutoff the bot nags the organizers unti
 | 1 | organizer | `/run create name content start_date end_date [cutoff_time] [cutoff_days_before] [earliest_start] [latest_start] [timezone]` makes a draft run, its slot grid and one cutoff per day. Default: each day closes at `cutoff_time` (config, `23:59`) `cutoff_days_before` (config, `1`) days earlier, in the run's timezone, so Monday closes Sunday 23:59. A run may start tomorrow with tonight as the first cutoff. A day already past its cutoff when the run opens starts closed. The create is refused if a cutoff is not before that day's first slot. |
 | 2 | organizer | `/helper grant @person` for each helper (once per fight). |
 | 3 | organizer | `/run open` starts signups. Only one run can be open at a time. |
-| 4 | players | `/availability`: pick roles, prog checkpoint (shown prominently, since it changes), then a day and its slots. Each day shows when it closes; a closed day is read-only. The **Limits** button sets max per day, max per run and how many checkpoints lower they accept. `/limits` and `/myschedule` show the same. Roles, prog and limits stay editable while any day is open. |
-| 5 | organizer | `/run status [day]`: each day's state (open, closed, exported) and cutoff, plus ticks per slot split into tanks, healers and DPS with a marker where the role mix could fill a party. |
+| 4 | players | `/availability`: pick roles (the **Roles** button opens a menu where you tick every role you can play), prog checkpoint (shown prominently, since it changes), then a day and its slots. Each day shows when it closes; a closed day is read-only. The **Limits** button sets max per day, max per run and how many checkpoints lower they accept. `/limits` and `/myschedule` show the same. Roles, prog and limits stay editable while any day is open. |
+| 5 | organizer | `/run status [day]`: each day's state (open, closed, exported) and cutoff, plus ticks per slot split into the seven roles (MT, OT, RG, SH, ML, RN, CS) with a marker where the role mix could fill a party. |
 | 6 | bot | At a day's cutoff the bot posts in `reminder_channel_id` (pinging `organizer_role_id` if set) and repeats every `reminder_interval_minutes` (30) until that day is exported or its first slot has started. State is kept in the database, so a restart neither repeats nor forgets. With no channel configured the bot logs a warning and `/run create` says so. |
 | 7 | organizer | `/draft export [day]`: the earliest closed day that is not exported yet. An open day is refused unless `force:true` (a forced early export does not stop the reminders). The bot attaches `<run>-<day>-signups.json` and saves it in `exports/`. `/run close [day]` closes a day now (no day: every remaining day) and `/run extend day new_cutoff` moves a cutoff. |
 | 8 | whoever runs the solver | `python ../raid-solver/solve.py exports/<file>.json -o draft.json` (unchanged solver). |
@@ -158,14 +158,23 @@ schema.sql         tables (fights come from prog_points/)       tests/          
 bot/seed.py        fake test players (python -m bot.seed)
 ```
 
+## Party roles
+
+The default party is 8 seats: `main_tank`, `off_tank`, `regen`, `shield`, `melee` (x2), `ranged` and `caster`
+(`party` in `config.json`). **The solver must use the same party**: `arcadion-solver` branch `seven-roles` (its
+`config.json` has the same `party`). The old tank/healer/dps roles are gone: a database made before this change
+is refused at startup with a message; move it aside and start fresh.
+
 ## Testing alone with fake players
 
-A full party needs 8 people (2 tanks, 2 healers, 4 DPS) on the same slot. To try the whole flow with just your
-own account, seed 7 fake players into the bot's database and be the eighth yourself:
+A full party needs 8 people on the same slot, one per seat: 1 main tank, 1 off tank, 1 regen healer, 1 shield
+healer, 2 melee, 1 ranged and 1 caster. Players tick every role they can play and the solver fills each seat
+exactly once. To try the whole flow with just your own account, seed 7 fake players into the bot's database and
+be the eighth yourself:
 
 ```bash
-uv run python -m bot.seed --run "test1"              # 7 fakes: 2 tanks, 2 healers, 3 DPS (one is a helper), you play dps
-uv run python -m bot.seed --run "test1" --you tank   # you play tank, the fakes fill the other seats
+uv run python -m bot.seed --run "test1"              # 7 fakes, one per seat except one melee (one is a helper); you play melee
+uv run python -m bot.seed --run "test1" --you main_tank   # you play main tank, the fakes fill the other seats
 uv run python -m bot.seed --remove                   # delete every fake player and all their rows
 ```
 

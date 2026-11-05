@@ -26,25 +26,25 @@ def roles_of(ctx, ids):
     return Counter(ctx.db.get_player(i)["roles"] for i in ids)
 
 
-def test_default_seeds_seven_fakes_that_leave_a_dps_seat_for_you(ctx, solo):
+def test_default_seeds_seven_fakes_that_leave_a_melee_seat_for_you(ctx, solo):
     report = seed.seed(ctx.db, ctx.cfg, solo, now=NOW)
     ids = [f["id"] for f in report["fakes"]]
     assert len(ids) == 7 and all(seed.is_fake(i) for i in ids)
-    assert roles_of(ctx, ids) == {"tank": 2, "healer": 2, "dps": 3}
-    assert [f["name"] for f in report["fakes"]][:3] == ["Test Tank 1", "Test Tank 2", "Test Healer 1"]
+    assert roles_of(ctx, ids) == {"main_tank": 1, "off_tank": 1, "regen": 1, "shield": 1, "melee": 1, "ranged": 1, "caster": 1}
+    assert [f["name"] for f in report["fakes"]][:3] == ["Test Main tank 1", "Test Off tank 1", "Test Regen healer 1"]
     assert all(ctx.db.get_player(i)["prog_index"] == 0 for i in ids)
     assert all(ctx.db.ticked_keys(solo["id"], i) == [SLOT] for i in ids)
-    assert report["slots_ticked"] == 1 and report["you"] == "dps" and report["warnings"] == []
+    assert report["slots_ticked"] == 1 and report["you"] == "melee" and report["warnings"] == []
 
 
 def test_the_seat_you_take_changes_the_fakes(ctx, solo):
-    report = seed.seed(ctx.db, ctx.cfg, solo, you="tank", now=NOW)
-    assert roles_of(ctx, [f["id"] for f in report["fakes"]]) == {"tank": 1, "healer": 2, "dps": 4}
+    report = seed.seed(ctx.db, ctx.cfg, solo, you="main_tank", now=NOW)
+    assert roles_of(ctx, [f["id"] for f in report["fakes"]]) == {"off_tank": 1, "regen": 1, "shield": 1, "melee": 2, "ranged": 1, "caster": 1}
 
 
 def test_larger_counts_add_whole_parties(ctx, solo):
     report = seed.seed(ctx.db, ctx.cfg, solo, count=15, now=NOW)
-    assert Counter(f["role"] for f in report["fakes"]) == {"tank": 4, "healer": 4, "dps": 7}
+    assert Counter(f["role"] for f in report["fakes"]) == {"main_tank": 2, "off_tank": 2, "regen": 2, "shield": 2, "melee": 3, "ranged": 2, "caster": 2}
 
 
 def test_one_helper_by_default_and_the_count_follows_the_option(ctx, solo):
@@ -97,7 +97,7 @@ def test_a_draft_run_gets_a_warning(ctx, make_run):
 
 
 def test_remove_deletes_fakes_everywhere_and_keeps_real_players(ctx, solo):
-    add_player(ctx, solo, 42, ["dps"], 0, [SLOT])                    # a real player
+    add_player(ctx, solo, 42, ["melee"], 0, [SLOT])                    # a real player
     report = seed.seed(ctx.db, ctx.cfg, solo, now=NOW)
     fake = report["fakes"][0]["id"]
     ctx.db.set_limits(solo["id"], fake, ctx.cfg, max_per_day=1)
@@ -127,17 +127,17 @@ def test_find_run_errors_are_readable(ctx, solo):
 
 def test_you_plus_the_fakes_make_one_full_party_in_the_export(ctx, solo):
     seed.seed(ctx.db, ctx.cfg, solo, now=NOW)
-    add_player(ctx, solo, 42, ["dps"], 0, [SLOT], name="You")
+    add_player(ctx, solo, 42, ["melee"], 0, [SLOT], name="You")
     data, warnings = build_signups(ctx.db, solo, ctx.cfg, day="2026-11-02")
     assert warnings == []
-    assert Counter(r for p in data["players"] for r in p["roles"]) == {"tank": 2, "healer": 2, "dps": 4}
+    assert Counter(r for p in data["players"] for r in p["roles"]) == {"main_tank": 1, "off_tank": 1, "regen": 1, "shield": 1, "melee": 2, "ranged": 1, "caster": 1}
     assert sum(1 for p in data["players"] if p["helper"]) == 1
 
 
 @pytest.mark.skipif(not (SOLVER_DIR / "solve.py").exists(), reason="raid-solver not next to raid-bot")
 def test_the_real_solver_builds_a_party_from_the_fakes_and_one_real_player(ctx, solo, tmp_path):
     seed.seed(ctx.db, ctx.cfg, solo, now=NOW)
-    add_player(ctx, solo, 42, ["dps"], 0, [SLOT], name="You")
+    add_player(ctx, solo, 42, ["melee"], 0, [SLOT], name="You")
     data, _ = build_signups(ctx.db, solo, ctx.cfg, day="2026-11-02")
     signups = tmp_path / "signups.json"
     signups.write_text(json.dumps(data))
@@ -168,7 +168,7 @@ def test_cli_seeds_and_removes_in_a_real_database_file(tmp_path, capsys, monkeyp
     db.close()
     assert seed.main(["--run", "cli", "--db", path]) == 0
     out = capsys.readouterr().out
-    assert "Seeded 7 fake players" in out and "pick dps" in out
+    assert "Seeded 7 fake players" in out and "pick Melee" in out
     assert seed.main(["--run", "missing", "--db", path]) == 1
     assert "No run called" in capsys.readouterr().err
     assert seed.main(["--remove", "--db", path]) == 0

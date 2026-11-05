@@ -121,6 +121,6 @@ def test_party_members_show_the_character_they_brought():
     with db.conn:
         db.conn.execute("INSERT INTO parties (id, run_id, slot_id, party_index, status) VALUES (1, 1, 1, 0, 'confirmed')")
         db.conn.executemany("INSERT INTO party_members (party_id, discord_id, role) VALUES (1, ?, ?)",
-                            [("1", "tank"), ("2", "healer")])
+                            [("1", "main_tank"), ("2", "regen")])
     got = db.party_member_characters(1)
     assert got["1"]["id"] == a and got["2"] is None

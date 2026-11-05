@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS slots (
 CREATE TABLE IF NOT EXISTS players (
     discord_id    TEXT PRIMARY KEY,
     display_name  TEXT NOT NULL,
-    roles         TEXT NOT NULL DEFAULT '',      -- comma list of roles they can play: tank,healer,dps
+    roles         TEXT NOT NULL DEFAULT '',      -- comma list of roles they can play: main_tank,off_tank,regen,shield,melee,ranged,caster
     timezone      TEXT NOT NULL DEFAULT 'America/New_York',
     prog_index    INTEGER,                       -- checkpoint idx in the current fight; NULL = not set yet
     updated_utc   TEXT
@@ -140,7 +140,7 @@ CREATE TABLE IF NOT EXISTS parties (
 CREATE TABLE IF NOT EXISTS party_members (
     party_id     INTEGER NOT NULL REFERENCES parties(id) ON DELETE CASCADE,
     discord_id   TEXT NOT NULL,
-    role         TEXT NOT NULL CHECK (role IN ('tank', 'healer', 'dps')),
+    role         TEXT NOT NULL CHECK (role IN ('main_tank', 'off_tank', 'regen', 'shield', 'melee', 'ranged', 'caster')),
     is_helper    INTEGER NOT NULL DEFAULT 0,
     placed_down  INTEGER NOT NULL DEFAULT 0,
     distance     INTEGER NOT NULL DEFAULT 0,

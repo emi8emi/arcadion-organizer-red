@@ -61,9 +61,9 @@ def test_get_run_by_name_and_newest(ctx, make_run):
 
 
 def test_upsert_player_updates_only_given_fields(ctx):
-    ctx.db.upsert_player(5, "Ann", roles=["dps", "tank"], prog_index=3, now=NOW)
+    ctx.db.upsert_player(5, "Ann", roles=["melee", "main_tank"], prog_index=3, now=NOW)
     p = ctx.db.upsert_player(5, "Ann the Tank", timezone="America/Chicago", now=NOW)
-    assert p["display_name"] == "Ann the Tank" and p["roles"] == "tank,dps"       # fixed role order
+    assert p["display_name"] == "Ann the Tank" and p["roles"] == "main_tank,melee"       # fixed role order
     assert p["prog_index"] == 3 and p["timezone"] == "America/Chicago"
     assert ctx.db.upsert_player(5, "Ann the Tank", prog_index=0)["prog_index"] == 0   # 0 is a real value
 
@@ -95,7 +95,7 @@ def test_helper_grant_and_revoke(ctx):
 
 
 def _party(slot, idx, ids):
-    roles = ["tank"] * 2 + ["healer"] * 2 + ["dps"] * 4
+    roles = ["main_tank", "off_tank", "regen", "shield", "melee", "melee", "ranged", "caster"]
     return {"slot_key": slot, "party_index": idx, "target_idx": 0,
             "members": [{"discord_id": str(i), "role": r, "helper": False, "placed_down": False, "distance": 0}
                         for i, r in zip(ids, roles)]}
@@ -124,7 +124,7 @@ def test_replace_draft_refuses_to_overwrite_confirmed_parties(ctx, make_run):
 def test_previous_unmatched_lists_ticked_players_without_a_party(ctx, make_run):
     old = make_run("Old", status="closed")
     ids = fill_one_party(ctx, old)
-    add_player(ctx, old, 99, ["dps"], 0, ["2026-11-02T20:00"])     # ticked, never seated
+    add_player(ctx, old, 99, ["melee"], 0, ["2026-11-02T20:00"])     # ticked, never seated
     ctx.db.replace_draft(old["id"], [_party("2026-11-02T17:00", 0, ids)], [])
     new = make_run("New")
     assert ctx.db.previous_unmatched(new) == set()                 # an unapproved draft does not count
@@ -152,3 +152,22 @@ def test_replace_draft_with_a_day_ignores_confirmed_parties_on_other_days(ctx, m
     ctx.db.replace_draft(run["id"], [_party("2026-11-02T17:00", 0, ids)], [], day="2026-11-02")
     with pytest.raises(DraftConflict):
         ctx.db.replace_draft(run["id"], [], [], day="2026-11-01")
+
+
+def test_a_database_with_the_old_roles_is_refused_with_a_clear_message(tmp_path):
+    import sqlite3
+    import pytest
+    path = tmp_path / "old.sqlite3"
+    old = sqlite3.connect(path)
+    old.execute("CREATE TABLE party_members (party_id INTEGER, discord_id TEXT, "
+                "role TEXT NOT NULL CHECK (role IN ('tank', 'healer', 'dps')))")
+    old.commit()
+    old.close()
+    with pytest.raises(RuntimeError, match="old tank/healer/dps roles"):
+        DB(str(path))
+
+
+def test_parse_role_accepts_the_usual_spellings():
+    from bot.config import parse_role
+    assert parse_role("Main tank") == "main_tank" and parse_role(" off-tank ") == "off_tank"
+    assert parse_role("CASTER") == "caster" and parse_role("dps") is None and parse_role("") is None

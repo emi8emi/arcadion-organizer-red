@@ -58,11 +58,11 @@ def test_the_loop_function_takes_the_snapshot_at_the_cutoff_and_is_idempotent(ct
 
 def test_the_snapshot_holds_name_roles_prog_and_effective_limits(ctx, make_run, clock):
     run, _ = world(ctx, make_run, clock)
-    ctx.db.upsert_player(9, "Defaulty", roles=["dps"], prog_index=4, now=clock["now"])
+    ctx.db.upsert_player(9, "Defaulty", roles=["melee"], prog_index=4, now=clock["now"])
     ctx.db.set_day_availability(run["id"], 9, D2, [S2])                  # never set limits: defaults are stored
     take_due_snapshots(ctx.db, clock["now"], ctx.cfg)
     row = ctx.db.snapshot_rows(run["id"], D2)["9"]
-    assert (row["display_name"], row["roles"], row["prog_index"]) == ("Defaulty", "dps", 4)
+    assert (row["display_name"], row["roles"], row["prog_index"]) == ("Defaulty", "melee", 4)
     assert (row["max_per_day"], row["max_per_run"], row["drop_checkpoints"]) == (
         ctx.cfg["default_max_per_day"], ctx.cfg["default_max_per_run"], 0)
 
@@ -148,23 +148,23 @@ def test_edits_after_the_cutoff_change_neither_that_days_export_nor_its_fingerpr
     mon_data, mon_fp = sig(ctx, run, D2)
     _, tue_fp = sig(ctx, run, D3)
     mon = {p["id"]: p for p in mon_data["players"]}
-    ctx.db.upsert_player(1, "Renamed Tank", roles=["healer"], prog_index=11, now=clock["now"])     # name, roles, prog
+    ctx.db.upsert_player(1, "Renamed Tank", roles=["regen"], prog_index=11, now=clock["now"])     # name, roles, prog
     ctx.db.set_limits(run["id"], 3, ctx.cfg, max_per_day=1, max_per_run=1, drop_checkpoints=2)     # limits
     assert sig(ctx, run, D2) == (mon_data, mon_fp)
     tue = {p["id"]: p for p in sig(ctx, run, D3)[0]["players"]}
     assert sig(ctx, run, D3)[1] != tue_fp                                  # the open day follows the live profile
-    assert tue["1"]["name"] == "Renamed Tank" and tue["1"]["roles"] == ["healer"] and tue["1"]["prog"] == 11
+    assert tue["1"]["name"] == "Renamed Tank" and tue["1"]["roles"] == ["regen"] and tue["1"]["prog"] == 11
     assert tue["3"]["max_per_run"] == 1 and tue["3"]["max_per_day"] == 1
     assert mon["3"]["max_per_run"] == 4 and mon["3"]["max_per_day"] == 2
-    assert mon["1"]["name"] == "Player 1" and mon["1"]["roles"] == ["tank"] and mon["1"]["prog"] == 0
+    assert mon["1"]["name"] == "Player 1" and mon["1"]["roles"] == ["main_tank"] and mon["1"]["prog"] == 0
 
 
 def test_a_draft_built_from_the_export_still_imports_after_profile_edits(ctx, make_run, clock):
     run, ids = world(ctx, make_run, clock)
     take_due_snapshots(ctx.db, clock["now"], ctx.cfg)
     draft = draft_for_day(ctx, run, D2, S2, ids)
-    ctx.db.upsert_player(1, "Renamed Tank", roles=["healer"], prog_index=11, now=clock["now"])
-    ctx.db.upsert_player(5, "Player 5", roles=["tank"])
+    ctx.db.upsert_player(1, "Renamed Tank", roles=["regen"], prog_index=11, now=clock["now"])
+    ctx.db.upsert_player(5, "Player 5", roles=["main_tank"])
     ctx.db.set_limits(run["id"], 2, ctx.cfg, max_per_day=1, max_per_run=1)
     summary = import_draft(ctx.db, run, draft, ctx.cfg, D2)
     assert summary["seated"] == 8
@@ -238,7 +238,7 @@ def test_menu_note_after_an_edit_names_the_frozen_days_and_the_first_open_day(ct
 
 def test_menu_shows_no_note_when_no_signed_up_day_is_frozen(ctx, make_run, clock):
     run, _ = world(ctx, make_run, clock)
-    ctx.db.upsert_player(40, "New", roles=["dps"], prog_index=1)
+    ctx.db.upsert_player(40, "New", roles=["melee"], prog_index=1)
     ctx.db.set_day_availability(run["id"], 40, D3, [S3_])                  # only the open day
     take_due_snapshots(ctx.db, clock["now"], ctx.cfg)
     assert snapshot_note(ctx, run, 40) == "" and snapshot_note(ctx, run, 999) == ""
@@ -266,7 +266,7 @@ def test_note_and_menu_strings_stay_within_discords_limits(ctx, make_run, clock)
     from datetime import date
     run = make_run("Long", start=date(2026, 11, 1), end=date(2026, 11, 14), per_day=True)
     keys = [s["slot_key"] for s in ctx.db.run_slots(run["id"])]
-    ctx.db.upsert_player(5, "Ann", roles=["tank"], prog_index=18)
+    ctx.db.upsert_player(5, "Ann", roles=["main_tank"], prog_index=18)
     for day in sorted({k[:10] for k in keys}):
         ctx.db.set_day_availability(run["id"], 5, day, [k for k in keys if k[:10] == day])
     at(clock, "2026-11-10T12:00")
@@ -342,6 +342,6 @@ def test_real_solver_round_trip_survives_a_profile_edit_after_the_cutoff(ctx, ma
     done = subprocess.run([sys.executable, str(SOLVER_DIR / "solve.py"), str(signups), "-o", str(out),
                            "--config", str(cfg_path)], capture_output=True, text=True, timeout=120)
     assert done.returncode == 0, done.stderr
-    ctx.db.upsert_player(1, "Renamed", roles=["dps"], prog_index=12)         # edited while the solver ran
+    ctx.db.upsert_player(1, "Renamed", roles=["melee"], prog_index=12)         # edited while the solver ran
     summary = import_draft(ctx.db, run, json.loads(out.read_text()), ctx.cfg, D2)
     assert summary["parties"] == 1 and summary["seated"] == 8
