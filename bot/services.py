@@ -15,6 +15,18 @@ MAX_PER_DAY = 8
 MAX_PER_RUN = 99
 
 
+def server_setting(ctx, guild_id, key):
+    """A server's own value (/settings), else the bot-wide default, but the default only for the home server
+    (GUILD_ID): another server's channels and role must never receive this one's, or the reverse."""
+    own = ctx.db.guild_setting(guild_id, key)
+    if own:
+        return own
+    home = ctx.cfg.get("home_guild_id")
+    if home is not None and guild_id is not None and str(home) == str(guild_id):
+        return ctx.cfg.get(key)
+    return None
+
+
 @dataclass
 class Ctx:
     db: DB

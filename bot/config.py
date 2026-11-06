@@ -47,6 +47,9 @@ DEFAULTS = {
     "confirm_reminder_hours": 3,     # unconfirmed players in an approved party are pinged again this long before the slot
     "prog_fetch_hours": 48,          # /debug score reads FFLogs reports from this many hours back (0 = no limit)
     "organizer_role_id": None,
+    # The server the env/config defaults above (organizer role, channels) belong to: GUILD_ID. Every other server
+    # starts with nothing set and is configured with /settings; defaults never leak into another server.
+    "home_guild_id": None,
     "database_url": None,            # the Postgres database shared with the dashboard; set DATABASE_URL in .env
     "export_dir": "exports",
     "debug_commands": 0,
@@ -68,6 +71,8 @@ def load_config(path=None, env=None):
         cfg["reminder_channel_id"] = int(env["REMINDER_CHANNEL_ID"])
     if env.get("PARTIES_CHANNEL_ID"):
         cfg["parties_channel_id"] = int(env["PARTIES_CHANNEL_ID"])
+    if env.get("GUILD_ID"):
+        cfg["home_guild_id"] = int(env["GUILD_ID"])
     if env.get("DATABASE_URL"):
         cfg["database_url"] = env["DATABASE_URL"]
     if env.get("FFLOGS_CLIENT_ID"):

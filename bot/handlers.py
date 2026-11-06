@@ -20,7 +20,7 @@ from .config import ROOT, role_label
 from .db import DraftConflict, DuplicateRun, parse_iso
 from .grid import day_cutoff, parse_date, parse_hm, parse_local_datetime, run_slots
 from .services import (snapshot_note, cutoff_of, day_label, day_state, day_summary_lines, limits_text, locked_prog_lines, open_days,
-                       profile_text, signup_open, tick_lines, valid_timezone, validate_limits)
+                       profile_text, server_setting, signup_open, tick_lines, valid_timezone, validate_limits)
 from .snapshots import ensure_snapshot
 from .solver_io import DraftError, build_signups, fingerprint, import_draft, is_note
 from .posting import post_day_parties
@@ -47,8 +47,7 @@ def is_organizer(ctx, user):
     if perms is not None and (getattr(perms, "manage_guild", False) or getattr(perms, "administrator", False)):
         return True
     guild_id = getattr(getattr(user, "guild", None), "id", None)
-    role_id = (ctx.db.guild_setting(guild_id, "organizer_role_id", ctx.cfg.get("organizer_role_id"))
-               if guild_id else ctx.cfg.get("organizer_role_id"))
+    role_id = server_setting(ctx, guild_id, "organizer_role_id") if guild_id else None
     return bool(role_id) and any(getattr(r, "id", None) == int(role_id) for r in getattr(user, "roles", []))
 
 
@@ -168,7 +167,7 @@ async def run_create(ctx, interaction, name, content, start_date, end_date,
              f"Each day's signups close at {cutoff_hm.strftime('%H:%M')} ({tz}) {when}: the first is "
              f"{discord.utils.format_dt(ordered[0], 'F')}, the last {discord.utils.format_dt(ordered[-1], 'F')}. "
              "It is a draft; use /run open to start signups."]
-    if not ctx.db.guild_setting(interaction.guild_id, "reminder_channel_id", ctx.cfg.get("reminder_channel_id")):
+    if not server_setting(ctx, interaction.guild_id, "reminder_channel_id"):
         lines.append("⚠ No reminder channel is set (use /settings set), "
                      "so the bot will not remind organizers to run /draft export after each cutoff.")
     await say(interaction, "\n".join(lines))
@@ -513,7 +512,7 @@ async def draft_confirm(ctx, interaction, name=None, day=None):
         return await say(interaction, f"{day_label(day_key)} has no draft parties" +
                          (" (it is already approved: players are asked in the slot threads)." if approved else
                           ". Import one with /draft import."))
-    channel_id = ctx.db.guild_setting(interaction.guild_id, "parties_channel_id", ctx.cfg.get("parties_channel_id"))
+    channel_id = server_setting(ctx, interaction.guild_id, "parties_channel_id")
     channel = await ctx.get_channel(int(channel_id)) if channel_id and ctx.get_channel else None
     if channel is None:
         return await say(interaction, "I need the parties channel to ask people (use /settings set).")
@@ -562,7 +561,7 @@ async def draft_approve(ctx, interaction, name=None, day=None):
             return await say(interaction, f"**{run['name']}** has no draft to approve. Import one with /draft import.")
         day_key = waiting[0]
     drafts, approved = ctx.db.day_party_counts(run["id"], day_key)
-    channel_id = ctx.db.guild_setting(interaction.guild_id, "parties_channel_id", ctx.cfg.get("parties_channel_id"))
+    channel_id = server_setting(ctx, interaction.guild_id, "parties_channel_id")
     missing = [s for s, ps in ctx.db.approved_slots(run["id"], day_key) if any(not p["message_id"] for p, _ in ps)]
     if drafts == 0 and approved == 0:
         return await say(interaction, f"{day_label(day_key)} has no draft to approve. Import one with /draft import.")
@@ -653,7 +652,7 @@ def _setting_mention(key, value):
 def settings_lines(ctx, guild_id):
     lines = []
     for key, label in SETTING_LABELS.items():
-        own, default = ctx.db.guild_setting(guild_id, key), ctx.cfg.get(key)
+        own, default = ctx.db.guild_setting(guild_id, key), server_setting(ctx, guild_id, key)
         if own:
             lines.append(f"**{label}:** {_setting_mention(key, own)}")
         elif default:

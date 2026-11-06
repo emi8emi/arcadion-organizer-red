@@ -467,3 +467,16 @@ def test_helper_grant_and_revoke_feed_the_export(ctx, make_run):
     assert "no longer a helper" in do(ctx, handlers.helper_revoke, organizer(), member).text
     assert "was not a helper" in do(ctx, handlers.helper_revoke, organizer(), member).text
     assert "Which content?" in do(ctx, handlers.helper_grant, organizer(), member, "Nope").text
+
+
+def test_defaults_from_env_do_not_leak_into_another_server(ctx):
+    """ORGANIZER_ROLE_ID belongs to the home server (100); in server 200 that role id means nothing."""
+    from bot.handlers import is_organizer, settings_lines
+    ctx.cfg["organizer_role_id"] = ORGANIZER_ROLE_ID
+    home = player(5, role_ids=[ORGANIZER_ROLE_ID], guild_id=100)
+    away = player(5, role_ids=[ORGANIZER_ROLE_ID], guild_id=200)
+    assert is_organizer(ctx, home.user) and not is_organizer(ctx, away.user)
+    ctx.db.set_guild_setting(200, "organizer_role_id", 4242)              # their own /settings
+    assert is_organizer(ctx, player(6, role_ids=[4242], guild_id=200).user)
+    assert not is_organizer(ctx, player(6, role_ids=[ORGANIZER_ROLE_ID], guild_id=200).user)
+    assert "(bot default)" in "\n".join(settings_lines(ctx, 100)) and "(bot default)" not in "\n".join(settings_lines(ctx, 300))

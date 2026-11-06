@@ -16,6 +16,7 @@ import discord
 
 from .config import ROLES, role_label
 from .db import iso, parse_iso
+from .services import server_setting
 from .votes import slot_end
 
 log = logging.getLogger("raidbot")
@@ -305,7 +306,7 @@ async def notify_decline(ctx, channel, run, slot, discord_id, code, text, approv
     """Tell the organizers (a role ping if one is set) that someone declined. Best effort."""
     if channel is None:
         return
-    role_id = ctx.db.guild_setting(run["guild_id"], "organizer_role_id", ctx.cfg.get("organizer_role_id"))
+    role_id = server_setting(ctx, run["guild_id"], "organizer_role_id")
     ping = f"<@&{role_id}> " if role_id else ""
     what = ("Organizers: swap them out with **Edit composition** on their party."
             if approved else "Re-export, run the solver and /draft import to refill the party.")
@@ -368,7 +369,7 @@ async def nudge_slot(ctx, slot_id):
     if any(p["status"] != "draft" for p, _ in parties):
         err = await thread_prompt(ctx, slot_id)
         return err or "Asked the unconfirmed players in the slot's thread (nobody is pinged when all have confirmed)."
-    channel_id = db.guild_setting(run["guild_id"], "parties_channel_id", ctx.cfg.get("parties_channel_id"))
+    channel_id = server_setting(ctx, run["guild_id"], "parties_channel_id")
     channel = await _channel(ctx, channel_id)
     if channel is None:
         return "No parties channel is set or I could not find it (/settings set)."

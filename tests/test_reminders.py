@@ -35,7 +35,7 @@ def test_nothing_is_due_before_the_cutoff(ctx, world):
 def test_first_reminder_goes_out_at_the_cutoff_with_the_numbers(ctx, world):
     items = due(ctx, CUTOFF + timedelta(minutes=1))
     assert [(i["day"], i["ready"], i["incomplete"], i["fillable"]) for i in items] == [("2026-11-02", 8, 0, 1)]
-    text = format_reminder(items[0], ctx.cfg)
+    text = format_reminder(items[0], None)
     assert text == ("Signups for **UWU week 1**, Mon 02 Nov closed: 8 signups, 1 slots that could fill. "
                     "Run `/draft export day:2026-11-02`.")
 
@@ -91,7 +91,7 @@ def test_a_day_nobody_is_ready_for_gets_one_notice_and_no_repeats(ctx, make_run)
     when = datetime(2026, 11, 2, 5, 0, tzinfo=UTC)
     items = due_reminders(ctx.db, when, ctx.cfg)
     assert [(i["day"], i["ready"]) for i in items] == [("2026-11-02", 0)]
-    assert "nobody ready to play" in format_reminder(items[0], ctx.cfg)
+    assert "nobody ready to play" in format_reminder(items[0], None)
     ctx.db.mark_reminded(run["id"], "2026-11-02", when)
     assert due_reminders(ctx.db, when + timedelta(hours=3), ctx.cfg) == []
 
@@ -101,13 +101,12 @@ def test_players_without_roles_or_prog_do_not_count_as_ready(ctx, world):
     ctx.db.set_day_availability(world["id"], 77, "2026-11-02", [S2])
     items = due(ctx, CUTOFF + timedelta(minutes=1))
     assert (items[0]["ready"], items[0]["incomplete"]) == (8, 1)
-    assert "8 signups (1 more still need roles or prog)" in format_reminder(items[0], ctx.cfg)
+    assert "8 signups (1 more still need roles or prog)" in format_reminder(items[0], None)
 
 
 def test_the_organizer_role_is_pinged_when_configured(ctx, world):
-    ctx.cfg["organizer_role_id"] = 777
     item = due(ctx, CUTOFF + timedelta(minutes=1))[0]
-    assert format_reminder(item, ctx.cfg).startswith("<@&777> Signups for")
+    assert format_reminder(item, 777).startswith("<@&777> Signups for")
 
 
 def test_draft_runs_are_never_reminded_but_closed_runs_are(ctx, world):
@@ -214,3 +213,51 @@ def test_a_missing_channel_is_not_fatal(ctx, world, clock):
     at(clock, "2026-11-02T05:00")
     assert run_send(ctx, None) == 0
     assert ctx.db.run_day(world["id"], "2026-11-02")["last_reminded_utc"] is None
+
+
+# ---------------------------------------------------------------- several servers
+
+@pytest.fixture
+def two_servers(ctx, make_run, world):
+    """`world` is server 100 (the home server); server 200 has its own run with 8 ready players on the same day."""
+    other = make_run(name="Other week", guild_id=200, per_day=True)
+    add_party_players(ctx, other, [S2])
+    return world, other
+
+
+def run_send_many(ctx, channels):
+    async def get_channel(channel_id):
+        return channels.get(channel_id)
+    return run_async(send_due_reminders(ctx, get_channel))
+
+
+def test_each_server_gets_its_reminders_in_its_own_channel_with_its_own_role(ctx, two_servers, clock):
+    ctx.db.set_guild_setting(100, "reminder_channel_id", 555)
+    ctx.db.set_guild_setting(200, "reminder_channel_id", 666)
+    ctx.db.set_guild_setting(200, "organizer_role_id", 777)
+    at(clock, "2026-11-02T05:00")
+    home, away = FakeChannel(), FakeChannel()
+    assert run_send_many(ctx, {555: home, 666: away}) == 2
+    assert len(home.sent) == 1 and "**UWU week 1**" in home.sent[0][0] and "<@&" not in home.sent[0][0]
+    assert len(away.sent) == 1 and "**Other week**" in away.sent[0][0] and away.sent[0][0].startswith("<@&777> ")
+
+
+def test_the_env_defaults_belong_to_the_home_server_only(ctx, two_servers, clock):
+    ctx.cfg["reminder_channel_id"] = 555                 # a default from .env; the home server is 100
+    at(clock, "2026-11-02T05:00")
+    home = FakeChannel()
+    assert run_send_many(ctx, {555: home}) == 1
+    assert len(home.sent) == 1 and "**UWU week 1**" in home.sent[0][0]
+    assert ctx.db.run_day(two_servers[1]["id"], "2026-11-02")["last_reminded_utc"] is None   # still due
+    ctx.db.set_guild_setting(200, "reminder_channel_id", 666)                                # set up later
+    away = FakeChannel()
+    assert run_send_many(ctx, {555: home, 666: away}) == 1 and "**Other week**" in away.sent[0][0]
+
+
+def test_a_server_with_a_broken_channel_does_not_stop_the_others(ctx, two_servers, clock):
+    ctx.db.set_guild_setting(100, "reminder_channel_id", 555)       # deleted channel
+    ctx.db.set_guild_setting(200, "reminder_channel_id", 666)
+    at(clock, "2026-11-02T05:00")
+    away = FakeChannel()
+    assert run_send_many(ctx, {666: away}) == 1 and "**Other week**" in away.sent[0][0]
+    assert ctx.db.run_day(two_servers[0]["id"], "2026-11-02")["last_reminded_utc"] is None

@@ -98,10 +98,21 @@ See "What is not built yet".
 | --- | --- |
 | `DISCORD_TOKEN` | the bot's token (required) |
 | `DATABASE_URL` | PostgreSQL URL shared with the dashboard (required), `postgresql://user:password@host:5432/raidbot` |
-| `GUILD_ID` | sync slash commands to one server only (instant); empty = global, up to an hour |
-| `ORGANIZER_ROLE_ID`, `REMINDER_CHANNEL_ID`, `PARTIES_CHANNEL_ID` | defaults for the organizer role and channels; `/settings` overrides them per server without editing files |
+| `GUILD_ID` | your **home server**: commands sync to it only (instant) and the three defaults below belong to it. Leave it empty to run in every server (commands sync globally, up to an hour) |
+| `ORGANIZER_ROLE_ID`, `REMINDER_CHANNEL_ID`, `PARTIES_CHANNEL_ID` | defaults for the home server (`GUILD_ID`) only; `/settings` sets them per server without editing files. Without `GUILD_ID` they are ignored (the bot warns at startup) |
 | `FFLOGS_CLIENT_ID`, `FFLOGS_CLIENT_SECRET` | FFLogs API client, needed for character lookups and prog scoring |
 | `DEBUG_COMMANDS` | `1` registers the organizer `/debug` testing commands |
+
+### Running in several servers
+
+The bot works in any server it is invited to. Runs, the organizer role, the reminder channel and the parties
+channel are all kept per server, and nothing from one server reaches another. To run it for several servers, leave
+`GUILD_ID` empty and, in each new server, an admin (Manage Server) runs `/settings set` to pick the organizer role,
+the reminder channel and the parties channel. Until the reminder channel is set, that server gets no export
+reminders (they are sent once it is set). What is shared on purpose: a player's profile (roles, prog, timezone,
+verified characters) follows them between servers, and every server writes to the same database. The dashboard is
+still single-server: login and the run list use `DISCORD_GUILD_ID`. There is no allowlist: anyone who can invite
+the bot can use it, so keep the bot private in the Discord developer portal if you do not want that.
 
 ## A run, start to finish
 

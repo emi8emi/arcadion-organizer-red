@@ -52,8 +52,12 @@ class RaidBot(discord.Client):
             await self.tree.sync(guild=guild)
         else:                                                     # global, can take up to an hour to appear
             await self.tree.sync()
-        if not self.ctx.cfg.get("reminder_channel_id"):
-            log.warning("No reminder_channel_id set: the bot will not remind organizers to run /draft export.")
+        cfg = self.ctx.cfg
+        if cfg.get("home_guild_id") is None and any(cfg.get(k) for k in ("organizer_role_id", "reminder_channel_id",
+                                                                         "parties_channel_id")):
+            log.warning("ORGANIZER_ROLE_ID / REMINDER_CHANNEL_ID / PARTIES_CHANNEL_ID are set but GUILD_ID is not, so "
+                        "they belong to no server and are ignored. Set GUILD_ID (your home server) or configure "
+                        "each server with /settings.")
         self.add_dynamic_items(RatePartyButton, PartyEndedButton, PartyEditButton, WhySwappedButton,
                                ConfirmButton, CancelButton)           # the thread buttons keep working after a restart
         self.reminder_loop.start()

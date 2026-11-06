@@ -81,7 +81,8 @@ class FakeInteraction:
         perms = SimpleNamespace(manage_guild=organizer, administrator=False)
         self.guild_id = guild_id
         self.user = FakeUser(id=user_id, display_name=name, guild_permissions=perms,
-                             roles=[SimpleNamespace(id=r) for r in role_ids], dms=[], dm_closed=dm_closed)
+                             roles=[SimpleNamespace(id=r) for r in role_ids], dms=[], dm_closed=dm_closed,
+                             guild=SimpleNamespace(id=guild_id))
         self.response, self.followup = FakeResponse(), FakeFollowup()
 
     async def edit_original_response(self, **kwargs):
@@ -209,6 +210,7 @@ def test_prog_points(monkeypatch):
 def cfg(tmp_path, db_url):
     c = load_config(env={})
     c["database_url"] = db_url
+    c["home_guild_id"] = 100                     # the guild every test run belongs to: the .env defaults apply to it
     c["export_dir"] = str(tmp_path / "exports")
     return c
 
