@@ -1,6 +1,10 @@
-# A local PostgreSQL for development and for the tests:  docker compose up -d
-# Creates the databases `raidbot` (for the bot and dashboard) and `raidtest` (for pytest). Local use only: the
-# password is public. For a real server use your own credentials and sslmode=require.
+# A local PostgreSQL for development and for the tests:  docker compose up -d   (run it in this folder)
+# POSTGRES_USER and POSTGRES_PASSWORD come from .env here. It creates the database `raidbot` for the bot and the
+# dashboard; the tests create their own `raidtest` the first time they run. Local use only: for a real server use
+# your own credentials and sslmode=require.
+# The fixed name keeps the project (and the raid-pgdata volume) the same wherever this file lives.
+name: raid-bot
+
 services:
   postgres:
     image: postgres:16
@@ -13,7 +17,6 @@ services:
       - "127.0.0.1:5432:5432"
     volumes:
       - raid-pgdata:/var/lib/postgresql/data
-      - ./docker/init-databases.sql:/docker-entrypoint-initdb.d/init-databases.sql:ro
 
 volumes:
   raid-pgdata:

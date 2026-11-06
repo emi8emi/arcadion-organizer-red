@@ -19,7 +19,8 @@ NO_PING = discord.AllowedMentions(users=True, roles=False, everyone=False)
 
 
 def party_message(run, slot, party, members, checkpoints, characters=None):
-    """The announcement for one party: members as mentions with roles, target, helper and placed-down marks.
+    """The announcement for one party: when it is and its target (two lines, plus an ended line). The member list is
+    deliberately not repeated here: it lives in the confirmation message.
 
     `characters` is {discord_id: characters row or None} (db.party_member_characters); without it no character is shown."""
     start = parse_iso(slot["start_utc"])

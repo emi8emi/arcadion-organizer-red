@@ -1,7 +1,7 @@
 """The migration runner: the dashboard owns the schema, so this is what keeps the shared database honest.
 
-Needs a PostgreSQL server: `docker compose up -d` in the repo root starts one that matches the default URL,
-or set TEST_DATABASE_URL. Every test works in its own throwaway schema.
+Needs a PostgreSQL server: `docker compose up -d` in dashboard/server starts one, and the default URL reads
+POSTGRES_USER / POSTGRES_PASSWORD (environment or .env) and creates the `raidtest` database; or set TEST_DATABASE_URL. Every test works in its own throwaway schema.
 """
 import itertools
 import os
@@ -11,14 +11,40 @@ from pathlib import Path
 
 import psycopg
 import pytest
-from psycopg.conninfo import make_conninfo
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app import migrate  # noqa: E402
 from app.migrate import MigrationError  # noqa: E402
 
 REAL = migrate.MIGRATIONS_DIR
-TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/raidtest")
+def _test_database_url(root):
+    """TEST_DATABASE_URL, else the docker-compose database: POSTGRES_USER / POSTGRES_PASSWORD from the environment
+    or from a .env file (repo root or dashboard/server), host localhost, database `raidtest`."""
+    if os.environ.get("TEST_DATABASE_URL"):
+        return os.environ["TEST_DATABASE_URL"]
+    from dotenv import dotenv_values
+    env = {}
+    for path in (root / ".env", root / "dashboard" / "server" / ".env"):
+        env.update(dotenv_values(path))
+    user = os.environ.get("POSTGRES_USER") or env.get("POSTGRES_USER") or "postgres"
+    password = os.environ.get("POSTGRES_PASSWORD") or env.get("POSTGRES_PASSWORD") or "postgres"
+    return make_conninfo(host="localhost", port=5432, dbname="raidtest", user=user, password=password)
+
+
+def _connect_admin(url):
+    """Connect to the test database; the default `raidtest` is created on the spot if the server lacks it."""
+    try:
+        return psycopg.connect(url, autocommit=True, connect_timeout=5)
+    except psycopg.OperationalError as e:
+        if "does not exist" not in str(e) or conninfo_to_dict(url).get("dbname") != "raidtest":
+            raise
+    with psycopg.connect(make_conninfo(url, dbname="postgres"), autocommit=True, connect_timeout=5) as server:
+        server.execute("CREATE DATABASE raidtest")
+    return psycopg.connect(url, autocommit=True, connect_timeout=5)
+
+
+TEST_DATABASE_URL = _test_database_url(Path(__file__).resolve().parent.parent.parent.parent)
 _ids = itertools.count(1)
 
 
@@ -26,10 +52,10 @@ _ids = itertools.count(1)
 def url():
     """A connection string whose search_path is a new empty schema of the test database."""
     try:
-        admin = psycopg.connect(TEST_DATABASE_URL, autocommit=True, connect_timeout=5)
+        admin = _connect_admin(TEST_DATABASE_URL)
     except psycopg.Error as e:
         pytest.exit(f"Cannot reach the test database ({e}). Start one with `docker compose up -d` "
-                    f"or set TEST_DATABASE_URL.", returncode=2)
+                    f"in dashboard/server or set TEST_DATABASE_URL.", returncode=2)
     name = f"m{os.getpid()}_{next(_ids)}"
     admin.execute(f'CREATE SCHEMA "{name}"')
     yield make_conninfo(TEST_DATABASE_URL, options=f"-c search_path={name}")

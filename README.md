@@ -50,16 +50,25 @@ See "What is not built yet".
    **View Channel**, **Send Messages**, **Create Public Threads** and **Send Messages in Threads**.
    `/draft approve` creates one thread per slot, so without the two thread permissions it can confirm a day
    but cannot post the parties. To remove swapped-out players from a thread it also needs **Manage Threads**.
-3. **Start PostgreSQL.** For development, `docker compose up -d` starts PostgreSQL 16 on `localhost:5432` with the
-   databases `raidbot` (for the bot and dashboard) and `raidtest` (for pytest); the password in that file is public,
-   so it is for local use only. For a real server use your own database with your own credentials and add
-   `?sslmode=require` to the URL.
+3. **Start PostgreSQL.** For development, the compose file in `dashboard/server` starts PostgreSQL 16 on
+   `localhost:5432` with a `raidbot` database for the bot and the dashboard:
+
+   ```bash
+   cd dashboard/server
+   cp .env.example .env          # set POSTGRES_USER and POSTGRES_PASSWORD (and the Discord settings, step 5)
+   docker compose up -d
+   cd ../..
+   ```
+
+   Put the same user and password in both `.env` files, inside `DATABASE_URL`
+   (`postgresql://USER:PASSWORD@localhost:5432/raidbot`). It is for local use only. For a real server use your own
+   database with your own credentials and add `?sslmode=require` to the URL.
 4. **Configure and migrate.** You need [uv](https://docs.astral.sh/uv/) and Python 3.11+.
 
    ```bash
    uv sync
    cp .env.example .env          # edit it: DISCORD_TOKEN, DATABASE_URL, and GUILD_ID for instant command sync
-   cd dashboard/server && pip install -r requirements.txt && python -m app.migrate && cd ../..
+   cd dashboard/server && uv run python -m app.migrate && cd ../..
    uv run python -m bot
    ```
 
@@ -72,11 +81,13 @@ See "What is not built yet".
    ```bash
    cd dashboard/server
    cp .env.example .env          # Discord OAuth settings, SESSION_SECRET and the same DATABASE_URL as the bot
-   uvicorn app.main:app --port 8000
+   uv run uvicorn app.main:app --port 8000
    ```
 
-   Only organizers (the role in `ORGANIZER_ROLE_ID`) can log in. The Svelte app in `dashboard/web` is only a login
-   page and a run list so far, and its `package.json` is not in the repo yet, so it cannot be built until that is added.
+   Only organizers (the role in `ORGANIZER_ROLE_ID`) can log in. The Svelte app in `dashboard/web` is a login
+   page and a run list so far. For development run `npm install && npm run dev` in `dashboard/web` and open
+   `http://localhost:5173` (it forwards `/api` to port 8000, so `BASE_URL` stays `http://localhost:5173`). After
+   `npm run build` the API serves the built app itself at `http://localhost:8000`; restart uvicorn after building.
 
 ### Settings
 
@@ -284,7 +295,7 @@ dashboard/
   web/                     Svelte app (login page and run list; no package.json yet)
 prog_points/               prog point files, one per fight
 tests/                     pytest suite for the bot
-docker-compose.yml         local PostgreSQL for development and tests
+dashboard/server/docker-compose.yml   local PostgreSQL for development and tests
 ```
 
 ## Party roles
@@ -343,7 +354,8 @@ the migration runner rolls a failed file back, but it cannot undo one that succe
 ## Tests
 
 ```bash
-docker compose up -d     # PostgreSQL for the tests (or set TEST_DATABASE_URL to any empty database)
+(cd dashboard/server && docker compose up -d)   # PostgreSQL; the tests create their own `raidtest` database
+# or set TEST_DATABASE_URL to any empty database. Otherwise POSTGRES_USER / POSTGRES_PASSWORD are read from .env.
 uv run pytest
 ```
 
