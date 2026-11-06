@@ -160,7 +160,11 @@ def prompt_text(ctx, run, slot, ask=None, reminder=False):
             ask = "Your party is set. Please confirm that you will be there:"
         else:
             ask = "Draft parties are ready. Are you in? Please confirm:"
-    lines = [f"**{run['name']}** · {when}", ask]
+    lines = [
+        "---",
+        f"**{run['name']}** · {when}",
+        ask
+    ]
     order = {r: i for i, r in enumerate(ROLES)}
     for party, members in parties:
         lines.append(f"**Party {party['party_index'] + 1}**")

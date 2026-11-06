@@ -23,19 +23,18 @@ def party_message(run, slot, party, members, checkpoints, characters=None):
 
     `characters` is {discord_id: characters row or None} (db.party_member_characters); without it no character is shown."""
     start = parse_iso(slot["start_utc"])
-    lines = [f"**Party {party['party_index'] + 1}** · {discord.utils.format_dt(start, 'F')} "
-             f"({discord.utils.format_dt(start, 'R')})",
-             f"Target: {checkpoint_label(checkpoints, party['target_idx'])}"]
-    order = {r: i for i, r in enumerate(ROLES)}
-    for m in sorted(members, key=lambda m: (order[m["role"]], m["discord_id"])):
-        marks = (" · helper" if m["is_helper"] else "") + (" · placed below their prog" if m["placed_down"] else "")
-        who = ""
-        if characters is not None:
-            c = characters.get(m["discord_id"])
-            who = f" · {c['name']} @ {c['world']}" if c else " · no character"
-        lines.append(f"• <@{m['discord_id']}> {role_label(m['role'])}{who}{marks}")
+    lines = [
+        f"**Party {party['party_index'] + 1}** · {discord.utils.format_dt(start, 'F')} "
+        f"({discord.utils.format_dt(start, 'R')})",
+        f"Target: {checkpoint_label(checkpoints, party['target_idx'])}",
+    ]
+        
     if party["ended_utc"]:
-        lines.append(f"✅ Ended {discord.utils.format_dt(parse_iso(party['ended_utc']), 't')}")
+        lines.extend([
+            "---",
+            f"✅ Ended {discord.utils.format_dt(parse_iso(party['ended_utc']), 't')}"
+        ])
+        
     return "\n".join(lines)
 
 
