@@ -318,6 +318,40 @@ async def notify_decline(ctx, channel, run, slot, discord_id, code, text, approv
         log.exception("could not tell the organizers about a decline")
 
 
+def thread_url(run, slot):
+    """Link to the slot's thread once the approved parties are posted, else None."""
+    if not slot["thread_id"]:
+        return None
+    return f"https://discord.com/channels/{run['guild_id']}/{slot['thread_id']}"
+
+
+def confirmation_dm_text(db, run, slot, discord_id):
+    """What a player is DMed after confirming: which party, their role, when, and where the thread is."""
+    start = parse_iso(slot["start_utc"])
+    where = ""
+    for party, members in slot_parties(db, slot["id"]):
+        mine = next((m for m in members if str(m["discord_id"]) == str(discord_id)), None)
+        if mine:
+            where = f"**Party {party['party_index'] + 1}** as {role_label(mine['role'])}"
+            break
+    lines = [f"✅ You're confirmed for **{run['name']}**" + (f": {where}." if where else "."),
+             f"When: {discord.utils.format_dt(start, 'F')} ({discord.utils.format_dt(start, 'R')})"]
+    url = thread_url(run, slot)
+    lines.append(f"Party thread: {url}" if url else
+                 "The party thread does not exist yet: it is created when the organizers approve the parties.")
+    return "\n".join(lines)
+
+
+async def dm_confirmation(ctx, user, run, slot):
+    """DM the player. Best effort: closed DMs or a Discord error return False, nothing else changes."""
+    try:
+        await user.send(confirmation_dm_text(ctx.db, run, slot, user.id))
+        return True
+    except Exception as e:
+        log.info("could not DM %s about slot %s: %s", getattr(user, "id", "?"), slot["id"], e)
+        return False
+
+
 def is_over(slot, now):
     return slot_end(slot) <= now
 

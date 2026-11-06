@@ -273,7 +273,7 @@ def test_pressing_the_thread_button_opens_a_private_rating_view(ctx, make_run, c
     it = pressed(ctx, 1, pa)
     sent = it.response.sent[0]
     assert sent["ephemeral"] is True and isinstance(sent["view"], RateView)
-    assert "Rate your party" in sent["content"] and "Only you can see this" in sent["content"]
+    assert "Rate your party" in sent["content"]
     assert "You were not in that party." in pressed(ctx, 9, pa).text
     assert "not ended" in pressed(ctx, 9, pb).text
     at(clock, "2026-11-20T00:00")

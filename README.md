@@ -124,6 +124,10 @@ draft, the export says its parties are not counted (and which `/draft approve` t
   draft members, with **I'll be there** and **Can't make it** buttons. The message is edited as answers come in
   (✅ confirmed, ⏳ waiting, ❌ can't make it). Running it again pings only the people who have not answered and
   replaces the old message.
+* **A DM after confirming:** the first time a player presses **I'll be there** for a slot, the bot DMs them their
+  party number, role, the time (local to them) and, once the parties are approved, a link to the slot's thread.
+  Before approval there is no thread yet, so the DM says so. Pressing the button again does not DM again, and a
+  player with closed DMs is told so in the reply (they stay confirmed). Switch it off with `dm_on_confirm: false`.
 * **Can't make it** asks for a reason, **unavailable at this slot** by default: it unticks that slot so the next
   `/draft export` leaves the player out of it. Other reasons: *unavailable the whole day* (unticks the day), *don't
   want this role or party* (ticks are kept; the organizers are told) and *other* (free text; unticks the slot). The
@@ -170,7 +174,7 @@ day: display name, roles, prog and their effective limits (defaults included).
 
 Config keys: `cutoff_time`, `cutoff_days_before`, `reminder_channel_id` (env `REMINDER_CHANNEL_ID`),
 `reminder_interval_minutes`, `organizer_role_id`, `parties_channel_id` (env `PARTIES_CHANNEL_ID`),
-`vote_window_hours` (72), `vote_expiry_days` (90), `vote_floor` (3), `confirm_reminder_hours` (3).
+`vote_window_hours` (72), `vote_expiry_days` (90), `vote_floor` (3), `confirm_reminder_hours` (3), `dm_on_confirm` (true).
 
 ### Votes: rating the people you played with
 

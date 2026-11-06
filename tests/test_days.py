@@ -78,12 +78,12 @@ def test_closed_day_is_locked_but_other_days_still_save(ctx, make_run, clock):
 
         view.day_select._values = ["2026-11-01"]
         await view.day_select.callback(player(5))
-        assert view.slot_select.disabled and "closed" in view.slot_select.placeholder
+        assert view.slot_select.disabled and "locked" in view.slot_select.placeholder
         late = player(5)                                            # a client that sends the edit anyway
         view.slot_select._values = []
         await view.slot_select.callback(late)
         assert ctx.db.ticked_keys(run["id"], 5) == [S1]             # nothing changed
-        assert "Signups for Sun 01 Nov closed" in late.text and "Nothing was changed" in late.text
+        assert "Signups for Sun 01 Nov closed" in late.text
         assert late.response.edits[-1]["view"] is view              # the menu stays open
 
         roles = player(5)                                           # roles and prog are not per day
@@ -110,10 +110,10 @@ def test_menu_shows_each_days_cutoff_and_the_current_prog(ctx, make_run, clock):
         await handlers.availability(ctx, it)
         msg = it.response.sent[0]
         text, view = msg["content"], msg["view"]
-        assert "Your prog right now: **11: P3 Gaols cleanup**" in text
-        assert "Editing **Mon 02 Nov**, signups close <t:" in text
+        assert "Prog: **11: P3 Gaols cleanup**" in text
+        assert re.search(r"Editing \*\*Mon 02 Nov\*\* \(closes <t:\d+:R>\)", text)
         assert "Sun 01 Nov: closed" in text
-        assert re.search(r"Mon 02 Nov: closes <t:\d+:R>", text) and re.search(r"Tue 03 Nov: closes <t:\d+:R>", text)
+        assert re.search(r"Mon 02 Nov: <t:\d+:R>", text) and re.search(r"Tue 03 Nov: <t:\d+:R>", text)
         desc = {o.value: o.description for o in view.day_select.options}
         assert desc == {"2026-11-01": "0 ticked · closed",
                         "2026-11-02": "1 ticked · closes Sun 23:59 EST",

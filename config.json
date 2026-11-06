@@ -16,6 +16,7 @@
   "cutoff_days_before": 1,
   "reminder_channel_id": null,
   "reminder_interval_minutes": 30,
+  "dm_on_confirm": true,
 
   "parties_channel_id": null,
   "vote_window_hours": 72,

@@ -92,13 +92,14 @@ def test_approve_confirms_and_posts_one_thread_per_slot_one_message_per_party(ct
     assert msg["allowed_mentions"].users is True and msg["allowed_mentions"].everyone is False
     text = msg["content"]
     assert text.startswith("**Party 1** · <t:") and ":F>" in text and ":R>" in text
-    assert "Target: 0: P1 Fresh" in text and "• <@1> Main tank" in text and "• <@8> Caster" in text
+    assert "Target: 0: P1 Fresh" in text
+    assert "<@" not in text                               # the member list lives in the confirmation message, not here
     slots = {s["slot_key"]: s for s in ctx.db.run_slots(run["id"])}
     assert slots[S2]["thread_id"] == "7000" and slots[S2B]["thread_id"] == "7001"
     assert all(p["message_id"] for p in ctx.db.parties(run["id"]))
 
 
-def test_party_message_marks_helpers_and_players_placed_down(ctx, make_run):
+def test_party_message_is_short_and_does_not_repeat_the_member_list(ctx, make_run):
     run, ids = setup_day(ctx, make_run)
     with ctx.db.conn:
         ctx.db.conn.execute("UPDATE party_members SET is_helper = 1 WHERE discord_id = '3'")
@@ -106,8 +107,10 @@ def test_party_message_marks_helpers_and_players_placed_down(ctx, make_run):
     confirm(ctx, run)
     slot, [(party, members)] = ctx.db.approved_slots(run["id"], D2)[0]
     text = party_message(run, slot, party, members, ctx.db.checkpoints(1))
-    assert "• <@3> Regen healer · helper" in text and "• <@8> Caster · placed below their prog" in text
-    assert len(text) < 2000
+    assert text.splitlines()[0].startswith("**Party 1**") and "Target: 0: P1 Fresh" in text
+    assert "<@" not in text and "helper" not in text and len(text.splitlines()) == 2
+    assert party_message(run, slot, {**dict(party), "ended_utc": "2026-11-02T23:30:00+00:00"}, members,
+                         ctx.db.checkpoints(1)).splitlines()[-1].startswith("✅ Ended")
 
 
 def test_approve_refuses_without_a_draft_and_when_already_approved(ctx, make_run):

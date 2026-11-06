@@ -72,9 +72,16 @@ async def press_confirm(ctx, interaction, slot_id):
     slot, run, error = _check(ctx, interaction, slot_id)
     if error:
         return await _reply(interaction, error)
-    cf.answer(ctx.db, run["id"], slot_id, str(interaction.user.id), "confirmed", ctx.now())
+    uid = str(interaction.user.id)
+    before = cf.statuses(ctx.db, slot_id).get(uid)
+    first_time = before is None or before["status"] != "confirmed"      # pressing again must not DM again
+    cf.answer(ctx.db, run["id"], slot_id, uid, "confirmed", ctx.now())
     when = discord.utils.format_dt(parse_iso(slot["start_utc"]), "F")
-    await _reply(interaction, f"Confirmed for {when}. See you there!")
+    await _reply(interaction, f"Confirmed for {when}. See you there!")        # answer Discord first, DM after
+    if first_time and ctx.cfg.get("dm_on_confirm", True):
+        if not await cf.dm_confirmation(ctx, interaction.user, run, slot):
+            await _reply(interaction, "I couldn't DM you the details (your DMs may be closed). "
+                                      "You are still confirmed.")
     await cf.refresh_prompts(ctx, slot_id)
 
 

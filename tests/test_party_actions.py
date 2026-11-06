@@ -186,7 +186,7 @@ def test_swap_updates_the_party_thread_standby_and_notifies_in_the_channel(ctx, 
     joined = next(m for m in thread.sent if "joins party 1" in (m["content"] or ""))
     assert "<@30> joins party 1 as Main tank, replacing <@1>" in joined["content"]
     assert joined["allowed_mentions"].users[0].id == 30                  # the new player is really pinged
-    assert "<@30>" in thread.edits[-1]["content"] and "<@1>" not in thread.edits[-1]["content"]
+    assert thread.edits and "<@30>" not in thread.edits[-1]["content"] and "<@1>" not in thread.edits[-1]["content"]   # the post no longer lists members
     notice = chan.sent[-1]
     assert "<@1> you were swapped out of party 1" in notice["content"]
     assert "no_show" not in notice["content"] and "Did not show" not in notice["content"]   # the reason stays private

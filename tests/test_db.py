@@ -169,8 +169,10 @@ def test_the_bot_refuses_a_database_nobody_migrated(unmigrated_url):
 
 
 def test_the_bot_refuses_a_database_behind_the_version_it_needs(db_url, monkeypatch):
-    monkeypatch.setattr(bot.db, "REQUIRED_SCHEMA_VERSION", bot.db.REQUIRED_SCHEMA_VERSION + 1)
-    with pytest.raises(SchemaNotReady, match="needs 3"):
+    from conftest import dashboard_migrate as mig
+    newest = max(int(f.name[:4]) for f in mig.MIGRATIONS_DIR.glob("[0-9]*.sql"))     # db_url has all of them applied
+    monkeypatch.setattr(bot.db, "REQUIRED_SCHEMA_VERSION", newest + 1)
+    with pytest.raises(SchemaNotReady, match=f"needs {newest + 1}"):
         DB(db_url)
 
 
@@ -218,7 +220,8 @@ def test_migration_0002_refuses_old_roles_and_then_accepts_the_new_ones(unmigrat
             mig.apply_migrations(conn)
         assert mig.current_version(conn) == 1                       # rolled back, nothing half-converted
         conn.execute("DELETE FROM parties")
-        assert mig.apply_migrations(conn) == [2]
+        newest = max(int(f.name[:4]) for f in mig.MIGRATIONS_DIR.glob("[0-9]*.sql"))
+        assert mig.apply_migrations(conn) == list(range(2, newest + 1))      # 0002 and everything after it
         conn.execute("INSERT INTO parties (run_id, slot_id, party_index, status, target_idx) VALUES (1, 1, 0, 'draft', 0)")
         conn.execute("INSERT INTO party_members (party_id, discord_id, role) VALUES (2, '9', 'caster')")
         with pytest.raises(psycopg.errors.CheckViolation):

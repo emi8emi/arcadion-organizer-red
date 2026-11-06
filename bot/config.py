@@ -39,6 +39,7 @@ DEFAULTS = {
     "cutoff_days_before": 1,         # ... this many days before the day (1 = the evening before)
     "reminder_channel_id": None,     # where the bot nags organizers to run /draft export
     "reminder_interval_minutes": 30,
+    "dm_on_confirm": True,           # DM a player the party time and thread link when they press "I'll be there"
     "parties_channel_id": None,      # where /draft approve posts the parties (one thread per slot)
     "vote_window_hours": 72,         # how long after a slot ends its players may rate each other
     "vote_expiry_days": 90,          # older votes stop counting (export and /votes summary)

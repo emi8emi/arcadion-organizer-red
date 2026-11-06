@@ -67,12 +67,21 @@ class FakeFollowup:
         self.sent.append({"content": content, **kwargs})
 
 
+class FakeUser(SimpleNamespace):
+    """A Discord member: `dms` collects what the bot sent them; dm_closed=True makes user.send fail like closed DMs."""
+
+    async def send(self, content=None, **kwargs):
+        if self.dm_closed:
+            raise RuntimeError("Cannot send messages to this user")
+        self.dms.append(content)
+
+
 class FakeInteraction:
-    def __init__(self, user_id=1, name="Tester", organizer=False, role_ids=(), guild_id=100):
+    def __init__(self, user_id=1, name="Tester", organizer=False, role_ids=(), guild_id=100, dm_closed=False):
         perms = SimpleNamespace(manage_guild=organizer, administrator=False)
         self.guild_id = guild_id
-        self.user = SimpleNamespace(id=user_id, display_name=name, guild_permissions=perms,
-                                    roles=[SimpleNamespace(id=r) for r in role_ids])
+        self.user = FakeUser(id=user_id, display_name=name, guild_permissions=perms,
+                             roles=[SimpleNamespace(id=r) for r in role_ids], dms=[], dm_closed=dm_closed)
         self.response, self.followup = FakeResponse(), FakeFollowup()
 
     async def edit_original_response(self, **kwargs):

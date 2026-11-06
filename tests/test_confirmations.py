@@ -359,3 +359,64 @@ def test_dashboard_without_parties(ctx, make_run):
     it = organizer()
     run_async(handlers.party_dashboard(ctx, it))
     assert "no parties yet" in it.text
+
+
+# ---------------------------------------------------------------- the DM after confirming
+
+def test_confirming_before_approval_dms_the_party_and_time_but_no_thread_yet(ctx, make_run):
+    run, ids, chan = draft_day(ctx, make_run)
+    ask(ctx)
+    it = pressed(ctx, confirm_views.press_confirm, slot_id(ctx, run), 3)
+    (dm,) = it.user.dms
+    role = next(m["role"] for _, ms in cf.slot_parties(ctx.db, slot_id(ctx, run)) for m in ms if m["discord_id"] == "3")
+    assert "**Party 1** as " in dm and cf.role_label(role) in dm and "<t:" in dm
+    assert "does not exist yet" in dm and "discord.com/channels" not in dm
+    assert "couldn't DM" not in it.text
+
+
+def test_confirming_after_approval_dms_the_thread_link(ctx, make_run):
+    run, ids, chan = draft_day(ctx, make_run)
+    approve(ctx, None, D2)
+    sid = slot_id(ctx, run)
+    thread_id = ctx.db.conn.execute("SELECT thread_id FROM slots WHERE id = ?", (sid,)).fetchone()["thread_id"]
+    assert thread_id
+    it = pressed(ctx, confirm_views.press_confirm, sid, 3)
+    (dm,) = it.user.dms
+    assert f"https://discord.com/channels/{run['guild_id']}/{thread_id}" in dm and "does not exist yet" not in dm
+
+
+def test_pressing_confirm_again_does_not_dm_again(ctx, make_run):
+    run, ids, chan = draft_day(ctx, make_run)
+    ask(ctx)
+    sid = slot_id(ctx, run)
+    first = pressed(ctx, confirm_views.press_confirm, sid, 3)
+    again = pressed(ctx, confirm_views.press_confirm, sid, 3)
+    assert len(first.user.dms) == 1 and again.user.dms == []
+    assert status(ctx, sid, 3) == "confirmed"
+
+
+def test_closed_dms_are_reported_but_the_confirmation_stands(ctx, make_run):
+    run, ids, chan = draft_day(ctx, make_run)
+    ask(ctx)
+    sid = slot_id(ctx, run)
+    it = player(3, dm_closed=True)
+    it.channel = Channel()
+    run_async(confirm_views.press_confirm(ctx, it, sid))
+    assert status(ctx, sid, 3) == "confirmed" and "Confirmed for" in it.text
+    assert "couldn't DM you" in it.text and "still confirmed" in it.text
+    assert "✅ <@3>" in chan.edits[-1]["content"]                       # the prompt is still updated
+
+
+def test_the_dm_can_be_switched_off(ctx, make_run):
+    ctx.cfg["dm_on_confirm"] = False
+    run, ids, chan = draft_day(ctx, make_run)
+    ask(ctx)
+    it = pressed(ctx, confirm_views.press_confirm, slot_id(ctx, run), 3)
+    assert it.user.dms == [] and status(ctx, slot_id(ctx, run), 3) == "confirmed"
+
+
+def test_declining_sends_no_dm(ctx, make_run):
+    run, ids, chan = draft_day(ctx, make_run)
+    ask(ctx)
+    it = pressed(ctx, confirm_views.submit_decline, slot_id(ctx, run), 3, "slot", None)
+    assert it.user.dms == []

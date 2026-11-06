@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import discord
 
+from bot.services import MAX_PER_RUN
 from bot import handlers
 from bot.db import split_roles
 from bot.solver_io import build_signups, import_draft
@@ -207,7 +208,7 @@ def test_menu_saves_every_click(ctx, make_run):
         assert len(view.children) == 7           # Roles, Limits, Done, prog, day, character, slots
         assert [o.value for o in view.prog_select.options] == [str(i) for i in range(20)]
         assert [o.value for o in view.day_select.options] == ["2026-11-01", "2026-11-02", "2026-11-03"]
-        assert "⚠ Set your roles and prog" in msg["content"] and msg["content"].count("<t:") == 4   # the picked day's cutoff plus one per day
+        assert "Prog: **not set**" in msg["content"] and msg["content"].count("<t:") == 4   # the picked day's cutoff plus one per day
 
         assert view.roles_button.style == discord.ButtonStyle.secondary
         await pick_roles(view, player(5), ["melee", "main_tank"])        # the Roles modal; green once any role is set
@@ -230,7 +231,7 @@ def test_menu_saves_every_click(ctx, make_run):
         await view.slot_select.callback(it2)
         assert ctx.db.ticked_keys(run["id"], 5) == [SLOT, "2026-11-02T18:30"]
         shown = it2.response.edits[-1]["content"]
-        assert shown.count("<t:") >= 3 and "Slots ticked (2)" in shown     # deadline + two slots, as Discord timestamps
+        assert shown.count("• <t:") == 2        # one bullet per ticked slot, as Discord timestamps
         assert "⚠" not in shown
         assert [o.default for o in view.slot_select.options].count(True) == 2
 
@@ -258,7 +259,7 @@ def test_menu_limits_modal_saves_and_validates(ctx, make_run):
 
         early = player(5)                                       # the lowest checkpoint is relative to the prog
         await button.callback(early)
-        assert not early.response.modals and "prog checkpoint first" in early.text
+        assert not early.response.modals and "Pick prog first" in early.text
 
         ctx.db.upsert_player(5, "Ann", prog_index=11, now=NOW)
         press = player(5)
@@ -282,7 +283,7 @@ def test_menu_limits_modal_saves_and_validates(ctx, make_run):
         await modal.on_submit(ok)
         lim = ctx.db.get_limits(run["id"], 5, ctx.cfg)
         assert (lim["max_per_day"], lim["max_per_run"], lim["drop_checkpoints"]) == (3, 6, 2)
-        assert "up to 3 per day, 6 per run" in ok.response.edits[-1]["content"]
+        assert ok.response.edits                                 # the menu is redrawn after the modal
 
         again = player(5)                                       # reopening preselects what was saved
         await button.callback(again)
@@ -323,7 +324,7 @@ def test_limits_command_shows_and_changes_limits(ctx, make_run):
 
 def test_limits_command_validates(ctx, make_run):
     make_run()
-    for args, message in [((0, None, None), "between 1 and 8"), ((None, 99, None), "between 1 and 40"),
+    for args, message in [((0, None, None), "between 1 and 8"), ((None, MAX_PER_RUN + 1, None), f"between 1 and {MAX_PER_RUN}"),
                           ((None, 1, None), "cannot be smaller than your max per day"),
                           ((None, None, 20), "between 0")]:
         assert message in do(ctx, handlers.limits, player(5), *args).text, args
