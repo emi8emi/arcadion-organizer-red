@@ -114,6 +114,13 @@ verified characters) follows them between servers, and every server writes to th
 still single-server: login and the run list use `DISCORD_GUILD_ID`. There is no allowlist: anyone who can invite
 the bot can use it, so keep the bot private in the Discord developer portal if you do not want that.
 
+**User panel.** `/settings set user_panel_channel:#channel` makes the bot post a message there and pin it. Its buttons
+(Availability, Add character, Verify character, Remove character, My characters) do what `/availability` and
+`/character add | verify | remove | list` do, privately to whoever presses them, and keep working after a restart.
+Setting the channel again replaces the message, moving it deletes the old one, and `/settings clear` with
+"User panel channel" deletes it. The bot needs View Channel and Send Messages there, plus Pin Messages (or Manage
+Messages) to pin; it warns if it cannot. The message id is stored in migration `0004_user_panel.sql`.
+
 ## A run, start to finish
 
 A run spans several days, but **each day has its own signup cutoff** (a fixed clock time, the day before by
@@ -268,7 +275,7 @@ the file now) and `/debug complete` (mark approved slots as ended so voting can 
 | Who | Command |
 | --- | --- |
 | players | `/availability` (roles, prog, slots), `/limits`, `/myschedule`, `/rate`, `/character add \| verify \| list \| remove` |
-| organizers | `/run create \| open \| close \| extend \| status`, `/helper grant \| revoke`, `/draft export \| import \| confirm \| approve`, `/party import \| dashboard`, `/votes summary`, `/settings show \| set \| clear` |
+| organizers | `/run create \| open \| close \| extend \| status`, `/helper grant \| revoke`, `/draft export \| import \| confirm \| approve`, `/party import \| dashboard`, `/votes summary`, `/settings show \| set \| clear` (incl. the user panel channel) |
 | organizers (needs `DEBUG_COMMANDS=1`) | `/debug complete \| setprog \| score \| sync_checkpoints` |
 
 ## The fingerprint check

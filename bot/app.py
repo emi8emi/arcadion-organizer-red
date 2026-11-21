@@ -14,6 +14,7 @@ from .grid import GridConfig
 from .posting import post_rating_prompts
 from .reminders import send_due_reminders
 from .snapshots import take_due_snapshots
+from .panel import PanelButton
 from .views import RatePartyButton
 from .parties import auto_end_parties
 from .party_views import PartyEditButton, PartyEndedButton, WhySwappedButton
@@ -59,7 +60,7 @@ class RaidBot(discord.Client):
                         "they belong to no server and are ignored. Set GUILD_ID (your home server) or configure "
                         "each server with /settings.")
         self.add_dynamic_items(RatePartyButton, PartyEndedButton, PartyEditButton, WhySwappedButton,
-                               ConfirmButton, CancelButton)           # the thread buttons keep working after a restart
+                               ConfirmButton, CancelButton, PanelButton)           # the thread buttons keep working after a restart
         self.reminder_loop.start()
 
     async def _get_channel(self, channel_id):

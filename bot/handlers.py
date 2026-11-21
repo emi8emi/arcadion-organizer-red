@@ -642,7 +642,7 @@ async def votes_summary(ctx, interaction):
 # ---------------------------------------------------------------- /settings (per server)
 
 SETTING_LABELS = {"organizer_role_id": "Organizer role", "reminder_channel_id": "Reminder channel",
-                  "parties_channel_id": "Parties channel"}
+                  "parties_channel_id": "Parties channel", "user_panel_channel_id": "User panel channel"}
 
 
 def _setting_mention(key, value):
@@ -676,18 +676,24 @@ async def settings_show(ctx, interaction):
     await say(interaction, "\n".join(["**Server settings**", *settings_lines(ctx, interaction.guild_id)]))
 
 
-async def settings_set(ctx, interaction, organizer_role=None, reminder_channel=None, parties_channel=None):
+async def settings_set(ctx, interaction, organizer_role=None, reminder_channel=None, parties_channel=None,
+                       user_panel_channel=None):
     if not await require_manage_server(interaction):
         return
     given = {"organizer_role_id": organizer_role, "reminder_channel_id": reminder_channel,
-             "parties_channel_id": parties_channel}
+             "parties_channel_id": parties_channel, "user_panel_channel_id": user_panel_channel}
     given = {k: v for k, v in given.items() if v is not None}
     if not given:
         return await say(interaction, "Pick at least one option to set.\n"
                          + "\n".join(settings_lines(ctx, interaction.guild_id)))
+    from . import panel                                         # panel imports handlers
     warnings = []
     me = interaction.guild.me
     for key, obj in given.items():
+        if key == "user_panel_channel_id":
+            await interaction.response.defer(ephemeral=True)     # posting and pinning can take a moment
+            warnings.extend(await panel.install_panel(ctx, interaction.guild_id, obj))
+            continue
         ctx.db.set_guild_setting(interaction.guild_id, key, obj.id)
         if key != "organizer_role_id" and me is not None:
             perms = obj.permissions_for(me)
@@ -705,6 +711,9 @@ async def settings_clear(ctx, interaction, setting):
         return
     if setting not in SETTING_LABELS:
         return await say(interaction, "That is not a setting.")
+    if setting == "user_panel_channel_id":
+        from . import panel
+        await panel.remove_panel(ctx, interaction.guild_id)
     ctx.db.set_guild_setting(interaction.guild_id, setting, None)
     await say(interaction, "\n".join([f"Cleared **{SETTING_LABELS[setting]}**.", *settings_lines(ctx, interaction.guild_id)]))
 

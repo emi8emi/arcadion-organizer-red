@@ -223,16 +223,20 @@ class SettingsGroup(app_commands.Group):
     @app_commands.command(name="set", description="Set the organizer role and/or channels (leave out what you keep)")
     @app_commands.describe(organizer_role="Role that counts as organizer (Manage Server always counts)",
                            reminder_channel="Channel where I remind organizers to run /draft export",
-                           parties_channel="Channel where I create the party threads after /draft approve")
+                           parties_channel="Channel where I create the party threads after /draft approve",
+                           user_panel_channel="Channel where I post and pin the player panel (availability, characters)")
     async def set(self, interaction: discord.Interaction, organizer_role: Optional[discord.Role] = None,
                   reminder_channel: Optional[discord.TextChannel] = None,
-                  parties_channel: Optional[discord.TextChannel] = None):
-        await handlers.settings_set(self.ctx, interaction, organizer_role, reminder_channel, parties_channel)
+                  parties_channel: Optional[discord.TextChannel] = None,
+                  user_panel_channel: Optional[discord.TextChannel] = None):
+        await handlers.settings_set(self.ctx, interaction, organizer_role, reminder_channel, parties_channel,
+                                    user_panel_channel)
 
     @app_commands.command(name="clear", description="Remove one setting, so the bot's default applies again")
     @app_commands.choices(setting=[app_commands.Choice(name="Organizer role", value="organizer_role_id"),
                                    app_commands.Choice(name="Reminder channel", value="reminder_channel_id"),
-                                   app_commands.Choice(name="Parties channel", value="parties_channel_id")])
+                                   app_commands.Choice(name="Parties channel", value="parties_channel_id"),
+                                   app_commands.Choice(name="User panel channel", value="user_panel_channel_id")])
     async def clear(self, interaction: discord.Interaction, setting: app_commands.Choice[str]):
         await handlers.settings_clear(self.ctx, interaction, setting.value)
 
