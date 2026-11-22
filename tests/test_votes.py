@@ -344,17 +344,21 @@ def test_feedback_names_players_of_the_same_party_and_replaces_the_earlier_one(c
     assert send(ctx, 1, pa, [2, 3], "toxic", "  shouted  ") == (True, "")
     rows = ctx.db.party_feedback_by(pa, 1)
     assert [(r["target_id"], r["category"], r["note"]) for r in rows] == [("2", "toxic", "shouted"), ("3", "toxic", "shouted")]
-    assert send(ctx, 1, pa, [4], "late_no_show") == (True, "")                  # sending again replaces
-    assert [(r["target_id"], r["category"]) for r in ctx.db.party_feedback_by(pa, 1)] == [("4", "late_no_show")]
+    assert send(ctx, 1, pa, [4], "late_no_show") == (True, "")                  # another category is added ...
+    assert [(r["target_id"], r["category"]) for r in ctx.db.party_feedback_by(pa, 1)] == [
+        ("2", "toxic"), ("3", "toxic"), ("4", "late_no_show")]
+    assert send(ctx, 1, pa, [5], "toxic", "again") == (True, "")                 # ... the same category replaces
+    assert [(r["target_id"], r["category"], r["note"]) for r in ctx.db.party_feedback_by(pa, 1)] == [
+        ("4", "late_no_show", ""), ("5", "toxic", "again")]
     assert send(ctx, 1, pa, [], "other", "great run") == (True, "")              # naming nobody is fine
-    assert [r["target_id"] for r in ctx.db.party_feedback_by(pa, 1)] == [None]
+    assert [r["target_id"] for r in ctx.db.party_feedback_by(pa, 1) if r["category"] == "other"] == [None]
     assert "yourself" in send(ctx, 1, pa, [1], "toxic")[1]
     assert "not in your party" in send(ctx, 1, pa, [9], "toxic")[1]
     assert "not in that party" in send(ctx, 9, pa, [2], "toxic")[1]
     assert "Pick what happened" in send(ctx, 1, pa, [2], "rude")[1]
     at(clock, "2026-11-20T00:00")
     assert "window closed" in send(ctx, 1, pa, [2], "toxic")[1]
-    assert len(ctx.db.party_feedback_by(pa, 1)) == 1                              # nothing changed
+    assert len(ctx.db.party_feedback_by(pa, 1)) == 3                              # nothing changed
 
 
 def test_the_feedback_modal_collects_players_category_and_details(ctx, make_run, clock):
@@ -381,9 +385,14 @@ def test_the_feedback_modal_collects_players_category_and_details(ctx, make_run,
         assert [o.value for o in modal2.players.options if o.default] == ["2"]
         assert [o.value for o in modal2.category.options if o.default] == ["communication"]
         assert modal2.note.default == "never spoke"
+        modal2.players._values, modal2.category._values, modal2.note._value = ["3"], ["late_no_show"], ""
+        await modal2.on_submit(player(1))                                         # a second category sits next to it
+        third = player(1)
+        await view.children[2].callback(third)
+        assert [o.value for o in third.response.modals[0].category.options if o.default] == ["late_no_show"]
     run_async(scenario())
-    [row] = ctx.db.party_feedback_by(pa, 1)
-    assert (row["target_id"], row["category"], row["note"]) == ("2", "communication", "never spoke")
+    assert [(r["target_id"], r["category"], r["note"]) for r in ctx.db.party_feedback_by(pa, 1)] == [
+        ("2", "communication", "never spoke"), ("3", "late_no_show", "")]
 
 
 def test_a_swapped_out_players_ratings_and_feedback_go_with_them(ctx, make_run, clock):
@@ -502,7 +511,7 @@ def test_old_votes_inferred_scores_and_tags_add_up_per_pair(ctx, make_run):
     ctx.db.add_vote(ctx.db.party(pids[0])["run_id"], slot, 1, 2, "like", RATED_AT)           # +1 old like, +0.5 inferred
     got = {(e["from"], e["to"]): e for e in export(ctx)}
     assert got[("1", "2")] == {"from": "1", "to": "2", "vote": "like"}                        # 1.5 is capped at 1.0
-    ctx.db.replace_party_feedback(ctx.db.party(pids[0]), 1, [(2, "toxic", "")], RATED_AT)    # -1 -> net 0.5 like
+    ctx.db.replace_party_feedback(ctx.db.party(pids[0]), 1, "toxic", [(2, "")], RATED_AT)    # -1 -> net 0.5 like
     assert {(e["from"], e["to"]): e for e in export(ctx, as_of=RATED_AT)}[("1", "2")]["weight"] == 0.5     # no fading yet
 
 

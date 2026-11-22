@@ -465,7 +465,9 @@ class FeedbackModal(discord.ui.Modal):
         super().__init__(title="Feedback about your party")
         self.ctx, self.party_id, self.user_id = ctx, party_id, str(user_id)
         others = [m for m in ctx.db.party_members(party_id) if m["discord_id"] != self.user_id][:25]
-        earlier = ctx.db.party_feedback_by(party_id, user_id)          # sending again replaces it: start from it
+        every = ctx.db.party_feedback_by(party_id, user_id)
+        last = max(every, key=lambda r: r["id"])["category"] if every else None   # start from the latest one sent;
+        earlier = [r for r in every if r["category"] == last]                      # the same category replaces it
         named = {r["target_id"] for r in earlier}
         self.players = discord.ui.Select(
             min_values=0, max_values=max(1, len(others)), required=False,
@@ -491,7 +493,8 @@ class FeedbackModal(discord.ui.Modal):
         ok, why = submit_feedback(self.ctx, self.user_id, self.party_id, targets, self.category.values[0],
                                   self.note.value)
         await interaction.response.send_message(
-            "Thanks, the organizers will see this (without your name). Send it again to change it."
+            "Thanks, the organizers will see this (without your name). Sending the same category again replaces it; "
+            "another category is added next to it."
             if ok else f"⚠ {why} Nothing was saved.", ephemeral=True)
 
 

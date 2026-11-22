@@ -85,7 +85,8 @@ def cast_party_rating(ctx, voter_id, party_id, vote):
 
 
 def submit_feedback(ctx, reporter_id, party_id, targets, category, note=""):
-    """Replace this reporter's feedback for a party: one row per player named (or one row naming nobody).
+    """Save this reporter's feedback of one category for a party: one row per player named (or one row naming
+    nobody). It replaces their earlier feedback of the same category for the party; other categories stay.
     Returns (ok, message)."""
     if category not in FEEDBACK_CATEGORIES:
         return False, "Pick what happened."
@@ -99,7 +100,7 @@ def submit_feedback(ctx, reporter_id, party_id, targets, category, note=""):
     if any(t not in members for t in targets):
         return False, "That player was not in your party."
     note = (note or "").strip()[:MAX_NOTE]
-    ctx.db.replace_party_feedback(party, reporter_id, [(t, category, note) for t in targets or [None]], ctx.now())
+    ctx.db.replace_party_feedback(party, reporter_id, category, [(t, note) for t in targets or [None]], ctx.now())
     return True, ""
 
 

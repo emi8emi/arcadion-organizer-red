@@ -640,12 +640,13 @@ class DB:
             out.setdefault(r["party_id"], []).append(r["discord_id"])
         return out
 
-    def replace_party_feedback(self, party, reporter_id, rows, now):
-        """Replace this reporter's feedback for the party. `rows`: [(target_id or None, category, note)]."""
+    def replace_party_feedback(self, party, reporter_id, category, rows, now):
+        """Replace this reporter's feedback of one category for the party (other categories stay).
+        `rows`: [(target_id or None, note)]."""
         with self.conn:
-            self.conn.execute("DELETE FROM party_feedback WHERE party_id = ? AND reporter_id = ?",
-                              (party["id"], str(reporter_id)))
-            for target, category, note in rows:
+            self.conn.execute("DELETE FROM party_feedback WHERE party_id = ? AND reporter_id = ? AND category = ?",
+                              (party["id"], str(reporter_id), category))
+            for target, note in rows:
                 self.conn.execute(
                     "INSERT INTO party_feedback (run_id, slot_id, party_id, reporter_id, target_id, category, note, "
                     "created_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",

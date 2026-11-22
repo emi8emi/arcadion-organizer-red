@@ -213,8 +213,8 @@ Config keys: `cutoff_time`, `cutoff_days_before`, `reminder_channel_id` (env `RE
   ephemeral (only-you) message with three buttons: 👍 Liked it, 👎 Didn't enjoy it (rating the group as a whole;
   saved at once, tap the other one to change it) and **Give feedback**. Feedback is a form: who it is about
   (optional, any members of the party), what happened (toxic or hostile behaviour, poor communication, late or
-  no-show, mechanics or performance, something else) and optional details. Sending it again replaces your earlier
-  feedback for that party. Nothing is ever posted publicly and players never see ratings or feedback.
+  no-show, mechanics or performance, something else) and optional details. Sending the same category again replaces your earlier
+  feedback of that category for that party; a different category is added next to it. Nothing is ever posted publicly and players never see ratings or feedback.
 * **Storage (migration 0005):** `party_ratings` is append-only (the latest row per voter and party is current);
   `party_feedback` has one row per player named. A player swapped out of a party takes their ratings and the
   feedback they gave or got for it with them. The old per-player `votes` table is no longer written, but its
