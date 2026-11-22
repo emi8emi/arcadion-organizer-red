@@ -139,7 +139,7 @@ Nothing is solved automatically: at each cutoff the bot nags the organizers unti
 | 8 | whoever runs the solver | `python ../raid-solver/solve.py exports/<file>.json -o draft.json` (unchanged solver). |
 | 9 | organizer | `/draft import [day]` with `draft.json`. Without `day` the bot finds the day by matching the draft's fingerprint to the exports. It replaces only that day's draft and refuses a stale file or a slot on another day. Nothing is posted to players yet. |
 | 10 | organizer | `/draft approve [day]` marks that day's draft parties `confirmed` and posts them in `parties_channel_id`: one thread per slot, one message per party (members as mentions with their role, the target checkpoint, helper and "placed below their prog" marks, Discord timestamps). Refused if the day has no draft or is already approved. With no channel configured (or one the bot cannot find) the day is still confirmed and you are told, and players see their party under `/myschedule`. If some posts fail, running it again posts only what is missing. A confirmed day can no longer be replaced by an import. |
-| 11 | players | When a slot ends, the bot (in its once-a-minute loop) posts once in that slot's thread a "Rate your party" button per party. See Votes below. |
+| 11 | players | When a slot ends, the bot (in its once-a-minute loop) posts once in that slot's thread a "Rate party N" button per party. See Ratings and feedback below. |
 
 Carry-over between days is done by the bot, so the solver is unchanged: each player's `max_per_run` is reduced
 by the parties they already have on earlier days of the same run (players with none left are left out of that
@@ -203,33 +203,52 @@ day: display name, roles, prog and their effective limits (defaults included).
 
 Config keys: `cutoff_time`, `cutoff_days_before`, `reminder_channel_id` (env `REMINDER_CHANNEL_ID`),
 `reminder_interval_minutes`, `organizer_role_id`, `parties_channel_id` (env `PARTIES_CHANNEL_ID`),
-`vote_window_hours` (72), `vote_expiry_days` (90), `vote_floor` (3), `confirm_reminder_hours` (3), `dm_on_confirm` (true).
+`vote_window_hours` (72), `vote_expiry_days` (90), `vote_floor` (3), `feedback_weights`, `compat_min_parties` (3), `compat_prior` (2), `confirm_reminder_hours` (3), `dm_on_confirm` (true).
 
-### Votes: rating the people you played with
+### Ratings and feedback: how the party went
 
-* **Who can vote:** two players who were in the same confirmed party of a slot that has ended (its start plus
-  `minutes`, or `actual_minutes` if the slot ended early), within `vote_window_hours` after the end. Never yourself.
-* **How:** press the button in the slot's thread, or use `/rate` if that message is lost. Both open an
-  ephemeral (only-you) view: pick a member, press Like, Neutral or Dislike (saved at once, the current rating is
-  shown), Done. Nothing about votes is ever posted publicly and no counts are shown to players.
-* **Storage:** the `votes` table is append-only; the latest row per (voter, target) is the current vote.
-  Neutral is stored, so changing your mind back to neutral clears an earlier like or dislike.
-* **Into the solver:** the day export has a `votes` list of `{"from", "to", "vote": "like"|"dislike"}`, which
-  the solver turns into a bonus for liked pairs and a penalty for disliked ones. For each (voter, target) the
-  bot takes the latest vote created **at or before the day's snapshot time**, drops neutral, drops votes older
-  than `vote_expiry_days`, and keeps only pairs where both players are in that export. A vote cast after the
-  cutoff therefore never changes that day's export, fingerprint or import. (A forced export of a still-open
-  day reads votes as of now, like the rest of its live data.) The solver counts every entry, and a dislike on
-  a pair beats likes, so a pair that voted both ways counts twice.
-* **Organizers:** `/votes summary` shows likes and dislikes received per player in the expiry window, hides
-  anyone with fewer than `vote_floor` votes, and names no voters.
+* **Who can rate:** players who were in the same confirmed party of a slot that has ended (its start plus
+  `minutes`, or `actual_minutes` if the slot ended early), within `vote_window_hours` after the end.
+* **How:** press "Rate party N" in the slot's thread, or use `/rate` if that message is lost. It opens an
+  ephemeral (only-you) message with three buttons: 👍 Liked it, 👎 Didn't enjoy it (rating the group as a whole;
+  saved at once, tap the other one to change it) and **Give feedback**. Feedback is a form: who it is about
+  (optional, any members of the party), what happened (toxic or hostile behaviour, poor communication, late or
+  no-show, mechanics or performance, something else) and optional details. Sending it again replaces your earlier
+  feedback for that party. Nothing is ever posted publicly and players never see ratings or feedback.
+* **Storage (migration 0005):** `party_ratings` is append-only (the latest row per voter and party is current);
+  `party_feedback` has one row per player named. A player swapped out of a party takes their ratings and the
+  feedback they gave or got for it with them. The old per-player `votes` table is no longer written, but its
+  rows still count until they pass `vote_expiry_days`.
+* **Into the solver:** for each directed pair (voter, player) the bot adds up three things and exports one entry
+  `{"from", "to", "vote": "like"|"dislike", "weight"}` (`weight` is left out when it is exactly 1, so data with
+  only old votes exports exactly as before):
+  1. an old per-player vote, +1 or -1;
+  2. an **inferred** like or dislike: how much better (or worse) the voter rated the parties that had the
+     player than the ones that did not, `(mean with - mean without) / 2` with 👍 = +1 and 👎 = -1, times
+     `n / (n + compat_prior)` where `n` combines both sample sizes. It needs `compat_min_parties` (3) rated
+     parties together and at least one without; someone who rates everything alike, or only ever plays with
+     the same people, infers nothing;
+  3. **tagged feedback**, a dislike of `feedback_weights[category]` that fades linearly to 0 over
+     `vote_expiry_days`. Defaults: toxic 1.0, communication 0.5, late or no-show 0.2, performance 0,
+     other 0 (lateness belongs to reliability and performance to skill scoring, so they count little or not at all
+     here). Feedback that names nobody has no effect on the solver.
 
-**Privacy, honestly.** Players never see anyone's votes, and organizers using the bot see aggregates only.
-But the exported signups file contains the raw `from`/`to` votes, because the solver reads them. Whoever holds
-an export (it is also saved in `exports/` on the bot's machine) or runs the solver can see who voted for whom,
-and `/votes summary` totals are small enough that an organizer who knows a party may still guess. Hiding the
-direction would need a small solver change (an aggregated pair format instead of per-voter entries). That is
-left for you to decide.
+  The sign of the sum picks like or dislike; a like weighs at most 1 and a dislike at most 3. Everything is read as
+  of the day's snapshot time, drops anything older than `vote_expiry_days`, and keeps only pairs where both
+  players are in that export, so a rating cast after the cutoff never changes that day's export, fingerprint or
+  import. The solver multiplies its `like` and `dislike` weights by each entry's `weight`.
+  Inferred scores start weak and sharpen as ratings build up; "liked" also reflects how the fight went, which the
+  bot cannot separate.
+* **Organizers:** `/feedback summary` shows, per player, how many rated parties they were in were 👍 and 👎 (hidden
+  below `vote_floor` ratings) and how many different players reported each category. `/feedback player [player]`
+  lists the notes about one player (or the ones that named nobody), newest first. Reporters are never named.
+  `/votes summary` still shows the older per-player votes.
+
+**Privacy, honestly.** Players never see anyone's ratings, and organizers using the bot see aggregates and
+anonymised notes only (a note's wording can still give its author away). But the exported signups file contains
+raw `from`/`to` entries, including the inferred and tagged ones, because the solver reads them. Whoever holds an
+export (it is also saved in `exports/` on the bot's machine) or runs the solver can see who rated whom. Hiding the
+direction would need an aggregated pair format and a small solver change. That is left for you to decide.
 
 ## Party threads: ending, editing and swapping
 
@@ -275,7 +294,7 @@ the file now) and `/debug complete` (mark approved slots as ended so voting can 
 | Who | Command |
 | --- | --- |
 | players | `/availability` (roles, prog, slots), `/limits`, `/myschedule`, `/rate`, `/character add \| verify \| list \| remove` |
-| organizers | `/run create \| open \| close \| extend \| status`, `/helper grant \| revoke`, `/draft export \| import \| confirm \| approve`, `/party import \| dashboard`, `/votes summary`, `/settings show \| set \| clear` (incl. the user panel channel) |
+| organizers | `/run create \| open \| close \| extend \| status`, `/helper grant \| revoke`, `/draft export \| import \| confirm \| approve`, `/party import \| dashboard`, `/feedback summary \| player`, `/votes summary`, `/settings show \| set \| clear` (incl. the user panel channel) |
 | organizers (needs `DEBUG_COMMANDS=1`) | `/debug complete \| setprog \| score \| sync_checkpoints` |
 
 ## The fingerprint check
@@ -343,9 +362,9 @@ to match), `--helpers N`, `--slot KEY` (repeatable, to tick only some slots), `-
 Create the run first (`/run create`) and seed **before the day's cutoff**: after it a day's signups are frozen in
 a snapshot, and the script skips days that have one. The script can run while the bot is running; run it again
 to reset the fakes. Their ids are 19-digit numbers above 9e18 that no real account can have, and they are not
-real server members, so posted parties show them as unknown-user mentions. You can rate them yourself (the
-rating menu takes names from the database), but they cannot rate you or each other. To see `/votes summary`
-(which hides anyone with fewer than 3 votes) you need 3 real voters, or votes added by hand to the `votes` table.
+real server members, so posted parties show them as unknown-user mentions. You can rate a party that has them in it and name them in feedback, but they cannot rate. To see `/feedback summary`
+(which hides party ratings of anyone in fewer than 3 rated parties) you need 3 real raters, or rows added by hand to
+`party_ratings`.
 
 ## The database schema (owned by the dashboard)
 

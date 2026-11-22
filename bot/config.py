@@ -43,7 +43,12 @@ DEFAULTS = {
     "parties_channel_id": None,      # where /draft approve posts the parties (one thread per slot)
     "vote_window_hours": 72,         # how long after a slot ends its players may rate each other
     "vote_expiry_days": 90,          # older votes stop counting (export and /votes summary)
-    "vote_floor": 3,                 # /votes summary hides players with fewer votes than this
+    "vote_floor": 3,                 # /votes summary and /feedback summary hide ratings of players with fewer votes than this
+    # How strongly tagged feedback counts as a dislike from the reporter towards the player named (0 = not at all);
+    # lateness and no-shows belong mostly to reliability, performance to skill. Missing keys use these numbers.
+    "feedback_weights": {"toxic": 1.0, "communication": 0.5, "late_no_show": 0.2, "performance": 0.0, "other": 0.0},
+    "compat_min_parties": 3,         # a like/dislike is inferred for a pair only after this many rated parties together
+    "compat_prior": 2,               # shrinks inferred scores towards 0: score = diff * n / (n + prior)
     "confirm_reminder_hours": 3,     # unconfirmed players in an approved party are pinged again this long before the slot
     "prog_fetch_hours": 48,          # /debug score reads FFLogs reports from this many hours back (0 = no limit)
     "organizer_role_id": None,

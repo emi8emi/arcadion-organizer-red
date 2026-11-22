@@ -147,9 +147,24 @@ class VotesGroup(app_commands.Group):
         super().__init__(name="votes", description="Organizers: ratings between players", guild_only=True)
         self.ctx = ctx
 
-    @app_commands.command(name="summary", description="Likes and dislikes received per player (no voter names)")
+    @app_commands.command(name="summary", description="Older per-player likes and dislikes received (no voter names)")
     async def summary(self, interaction: discord.Interaction):
         await handlers.votes_summary(self.ctx, interaction)
+
+
+class FeedbackGroup(app_commands.Group):
+    def __init__(self, ctx):
+        super().__init__(name="feedback", description="Organizers: party ratings and player feedback", guild_only=True)
+        self.ctx = ctx
+
+    @app_commands.command(name="summary", description="Party ratings and reports per player (no reporter names)")
+    async def summary(self, interaction: discord.Interaction):
+        await handlers.feedback_summary(self.ctx, interaction)
+
+    @app_commands.command(name="player", description="Read the notes about one player (leave empty for notes that named nobody)")
+    @app_commands.describe(player="The player the feedback is about")
+    async def player(self, interaction: discord.Interaction, player: Optional[discord.Member] = None):
+        await handlers.feedback_player(self.ctx, interaction, player)
 
 
 class HelperGroup(app_commands.Group):
@@ -278,6 +293,7 @@ def register(tree, ctx):
     tree.add_command(HelperGroup(ctx))
     tree.add_command(PartyGroup(ctx))
     tree.add_command(VotesGroup(ctx))
+    tree.add_command(FeedbackGroup(ctx))
     tree.add_command(SettingsGroup(ctx))
     tree.add_command(CharacterGroup(ctx))
     if os.getenv("DEBUG_COMMANDS") == "1":  # testing only, off by default

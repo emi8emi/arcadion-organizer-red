@@ -19,7 +19,7 @@ PROG_POINTS_DIR = Path(__file__).resolve().parent.parent / "prog_points"
 
 # The newest dashboard migration this code depends on. Raise it in the same change that starts using a
 # new table or column; a database that is further along is fine (migrations only add things).
-REQUIRED_SCHEMA_VERSION = 4
+REQUIRED_SCHEMA_VERSION = 5
 
 
 GUILD_SETTING_KEYS = ("organizer_role_id", "reminder_channel_id", "parties_channel_id",
@@ -602,6 +602,68 @@ class DB:
             self.conn.execute(f"UPDATE guild_settings SET {key} = ? WHERE guild_id = ?",
                               (None if value is None else str(value), str(guild_id)))
 
+    # ------------------------------------------------------------ party ratings and feedback
+
+    def add_party_rating(self, party, voter_id, vote, now):
+        """Append a rating (like / dislike) for a whole party; the latest per (voter, party) is current."""
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO party_ratings (run_id, slot_id, party_id, voter_id, vote, created_utc) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (party["run_id"], party["slot_id"], party["id"], str(voter_id), vote, iso(now)))
+
+    def party_rating(self, party_id, voter_id):
+        row = self.conn.execute(
+            "SELECT vote FROM party_ratings WHERE party_id = ? AND voter_id = ? ORDER BY created_utc DESC, id DESC LIMIT 1",
+            (party_id, str(voter_id))).fetchone()
+        return row["vote"] if row else None
+
+    def latest_party_ratings(self, as_of, since=None):
+        """Every voter's current rating of each party as of `as_of` (latest row at or before it)."""
+        rows = self.conn.execute(
+            """SELECT r.* FROM party_ratings r
+               WHERE r.created_utc <= ? AND r.id = (
+                   SELECT r2.id FROM party_ratings r2 WHERE r2.voter_id = r.voter_id AND r2.party_id = r.party_id
+                     AND r2.created_utc <= ? ORDER BY r2.created_utc DESC, r2.id DESC LIMIT 1)
+               ORDER BY r.voter_id, r.party_id""", (iso(as_of), iso(as_of))).fetchall()
+        return [r for r in rows if since is None or r["created_utc"] >= iso(since)]
+
+    def party_member_ids(self, party_ids):
+        """{party_id: [discord ids]} for these parties."""
+        party_ids = list(party_ids)
+        if not party_ids:
+            return {}
+        marks = ",".join("?" for _ in party_ids)
+        out = {}
+        for r in self.conn.execute(f"SELECT party_id, discord_id FROM party_members WHERE party_id IN ({marks}) "
+                                   "ORDER BY party_id, discord_id", party_ids).fetchall():
+            out.setdefault(r["party_id"], []).append(r["discord_id"])
+        return out
+
+    def replace_party_feedback(self, party, reporter_id, rows, now):
+        """Replace this reporter's feedback for the party. `rows`: [(target_id or None, category, note)]."""
+        with self.conn:
+            self.conn.execute("DELETE FROM party_feedback WHERE party_id = ? AND reporter_id = ?",
+                              (party["id"], str(reporter_id)))
+            for target, category, note in rows:
+                self.conn.execute(
+                    "INSERT INTO party_feedback (run_id, slot_id, party_id, reporter_id, target_id, category, note, "
+                    "created_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (party["run_id"], party["slot_id"], party["id"], str(reporter_id),
+                     None if target is None else str(target), category, note, iso(now)))
+
+    def party_feedback_by(self, party_id, reporter_id):
+        return self.conn.execute("SELECT * FROM party_feedback WHERE party_id = ? AND reporter_id = ? ORDER BY id",
+                                 (party_id, str(reporter_id))).fetchall()
+
+    def feedback_rows(self, as_of, since=None):
+        """Feedback created in (since, as_of], joined with the party's slot, oldest first."""
+        rows = self.conn.execute(
+            """SELECT f.*, s.slot_key, p.party_index FROM party_feedback f
+               JOIN parties p ON p.id = f.party_id JOIN slots s ON s.id = f.slot_id
+               WHERE f.created_utc <= ? ORDER BY f.created_utc, f.id""", (iso(as_of),)).fetchall()
+        return [r for r in rows if since is None or r["created_utc"] >= iso(since)]
+
     def move_slot_start(self, slot_id, start_utc):
         """Debug only: move a slot's start (used by /debug complete to make a slot count as ended)."""
         with self.conn:
@@ -735,6 +797,9 @@ class DB:
             self.conn.execute("DELETE FROM play_log WHERE slot_id = ? AND discord_id = ?", (party["slot_id"], out_id))
             self.conn.execute("DELETE FROM votes WHERE slot_id = ? AND (voter_id = ? OR target_id = ?)",
                               (party["slot_id"], out_id, out_id))
+            self.conn.execute("DELETE FROM party_ratings WHERE party_id = ? AND voter_id = ?", (party_id, out_id))
+            self.conn.execute("DELETE FROM party_feedback WHERE party_id = ? AND (reporter_id = ? OR target_id = ?)",
+                              (party_id, out_id, out_id))
             if party["ended_utc"] and minutes is not None:
                 self.conn.execute("INSERT INTO play_log (slot_id, discord_id, minutes) VALUES (?, ?, ?) "
                                   "ON CONFLICT (slot_id, discord_id) DO UPDATE SET minutes = excluded.minutes",

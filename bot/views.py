@@ -4,7 +4,7 @@ import discord
 from . import characters as ch
 from .config import ROLES, role_label
 from .db import parse_iso, split_roles
-from .votes import cast_vote, current_rating, time_reason
+from .votes import FEEDBACK_CATEGORIES, MAX_NOTE, cast_party_rating, check_rater, submit_feedback, time_reason
 from .services import (checkpoint_label, clip_message, day_accepts_signups, day_label, day_state, cutoff_of,
                        profile_text, signup_open, snapshot_note, tick_lines, validate_limits)
 
@@ -388,41 +388,35 @@ async def open_rating(ctx, interaction, party_id):
     await interaction.response.send_message(view.render(), view=view, ephemeral=True)
 
 
-RATING_EMOJI = {"like": "👍", "neutral": "😐", "dislike": "👎"}
-RATING_STYLE = {"like": discord.ButtonStyle.success, "neutral": discord.ButtonStyle.secondary,
-                "dislike": discord.ButtonStyle.danger}
-NEXT_RATING = {"neutral": "like", "like": "dislike", "dislike": "neutral"}   # one tap = next rating
+RATING_BUTTONS = {"like": ("Liked it", "👍", discord.ButtonStyle.success),
+                  "dislike": ("Didn't enjoy it", "👎", discord.ButtonStyle.danger)}
 
 
 class RateView(discord.ui.View):
-    """Ephemeral: one button per other member. Tap a name to cycle their rating 😐 -> 👍 -> 👎 -> 😐."""
+    """Ephemeral: rate the party as a whole (👍 / 👎), or give feedback about a problem or a player."""
 
     def __init__(self, ctx, party_id, user_id):
         super().__init__(timeout=900)
         self.ctx, self.party_id, self.user_id = ctx, party_id, str(user_id)
         self.notice = ""
         self.title = party_title(ctx.db.party(party_id))
-        self.members = [m for m in ctx.db.party_members(party_id) if m["discord_id"] != self.user_id][:20]
-        now = ctx.now()
-        self.ratings = {m["discord_id"]: current_rating(ctx.db, self.user_id, m["discord_id"], now)
-                        for m in self.members}
-        self.buttons = []
-        for i, m in enumerate(self.members):
-            name = (ctx.db.get_player(m["discord_id"]) or {"display_name": "Player"})["display_name"]
-            button = MemberRateButton(m["discord_id"], f"{name} · {role_label(m['role'])}"[:80], row=i // 5)
-            self.buttons.append(button)
-            self.add_item(button)
-        self.add_item(RateDoneButton())
+        self.rating = ctx.db.party_rating(party_id, self.user_id)
+        self.buttons = {r: PartyRatingButton(r) for r in RATING_BUTTONS}
+        for b in self.buttons.values():
+            self.add_item(b)
+        self.add_item(FeedbackButton())
         self.sync()
 
     def sync(self):
-        for b in self.buttons:
-            rating = self.ratings[b.target_id]
-            b.emoji, b.style = RATING_EMOJI[rating], RATING_STYLE[rating]
+        for rating, b in self.buttons.items():
+            b.style = RATING_BUTTONS[rating][2] if rating == self.rating else discord.ButtonStyle.secondary
 
     def render(self):
-        lines = [f"**Rate your party:** {self.title}",
-                 "Tap a player to change your rating: 😐 neutral → 👍 like → 👎 dislike → 😐."]
+        lines = [f"**How was your party overall?** {self.title}",
+                 "Tap 👍 or 👎 for the group as a whole. Use **Give feedback** to point out a problem or a player. "
+                 "Only organizers ever see feedback, and never your name."]
+        if self.rating:
+            lines.append(f"Your rating: {RATING_BUTTONS[self.rating][1]} (tap the other one to change it)")
         if self.notice:
             lines.append(self.notice)
         return "\n".join(lines)[:1990]
@@ -435,30 +429,70 @@ class RateView(discord.ui.View):
         await interaction.response.edit_message(content=self.render(), view=self)
 
 
-class MemberRateButton(discord.ui.Button):
-    def __init__(self, target_id, label, row):
-        super().__init__(label=label, style=discord.ButtonStyle.secondary, emoji=RATING_EMOJI["neutral"], row=row)
-        self.target_id = target_id
+class PartyRatingButton(discord.ui.Button):
+    def __init__(self, rating):
+        label, emoji, _ = RATING_BUTTONS[rating]
+        super().__init__(label=label, emoji=emoji, style=discord.ButtonStyle.secondary)
+        self.rating = rating
 
     async def callback(self, interaction):
         v = self.view
-        new = NEXT_RATING[v.ratings[self.target_id]]
-        ok, why = cast_vote(v.ctx, v.user_id, self.target_id, new, v.party_id)
+        ok, why = cast_party_rating(v.ctx, v.user_id, v.party_id, self.rating)
         if ok:
-            v.ratings[self.target_id], v.notice = new, ""
+            v.rating, v.notice = self.rating, ""
         else:
             v.notice = f"⚠ {why} Nothing was saved."
         await v.redraw(interaction)
 
 
-class RateDoneButton(discord.ui.Button):
+class FeedbackButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="Done", style=discord.ButtonStyle.primary, row=4)
+        super().__init__(label="Give feedback", style=discord.ButtonStyle.primary)
 
     async def callback(self, interaction):
-        self.view.stop()
-        await interaction.response.edit_message(content="✅ Saved. Press the button again any time before the window closes.",
-                                                view=None)
+        v = self.view
+        _, why = check_rater(v.ctx.db, v.ctx.cfg, v.ctx.now(), v.user_id, v.party_id)
+        if why:
+            v.notice = f"⚠ {why}"
+            return await v.redraw(interaction)
+        await interaction.response.send_modal(FeedbackModal(v.ctx, v.party_id, v.user_id))
+
+
+class FeedbackModal(discord.ui.Modal):
+    """Who it is about (optional), what happened, and details. Sent to organizers without the reporter's name."""
+
+    def __init__(self, ctx, party_id, user_id):
+        super().__init__(title="Feedback about your party")
+        self.ctx, self.party_id, self.user_id = ctx, party_id, str(user_id)
+        others = [m for m in ctx.db.party_members(party_id) if m["discord_id"] != self.user_id][:25]
+        earlier = ctx.db.party_feedback_by(party_id, user_id)          # sending again replaces it: start from it
+        named = {r["target_id"] for r in earlier}
+        self.players = discord.ui.Select(
+            min_values=0, max_values=max(1, len(others)), required=False,
+            options=[discord.SelectOption(
+                label=((ctx.db.get_player(m["discord_id"]) or {"display_name": "Player"})["display_name"]
+                       + " · " + role_label(m["role"]))[:100],
+                value=m["discord_id"], default=m["discord_id"] in named) for m in others]
+            or [discord.SelectOption(label="Nobody else", value="none")])
+        self.category = discord.ui.Select(
+            min_values=1, max_values=1,
+            options=[discord.SelectOption(label=label, value=key, default=bool(earlier) and earlier[0]["category"] == key)
+                     for key, (label, _) in FEEDBACK_CATEGORIES.items()])
+        self.note = discord.ui.TextInput(style=discord.TextStyle.paragraph, required=False, max_length=MAX_NOTE,
+                                         default=(earlier[0]["note"] if earlier else None) or None,
+                                         placeholder="What happened? Organizers read this.")
+        self.add_item(discord.ui.Label(text="Who is it about?", component=self.players,
+                                       description="Leave empty if it is about the party in general."))
+        self.add_item(discord.ui.Label(text="What happened?", component=self.category))
+        self.add_item(discord.ui.Label(text="Details (optional)", component=self.note))
+
+    async def on_submit(self, interaction):
+        targets = [v for v in self.players.values if v != "none"]
+        ok, why = submit_feedback(self.ctx, self.user_id, self.party_id, targets, self.category.values[0],
+                                  self.note.value)
+        await interaction.response.send_message(
+            "Thanks, the organizers will see this (without your name). Send it again to change it."
+            if ok else f"⚠ {why} Nothing was saved.", ephemeral=True)
 
 
 class RateListView(discord.ui.View):

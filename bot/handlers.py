@@ -26,7 +26,8 @@ from .solver_io import DraftError, build_signups, fingerprint, import_draft, is_
 from .posting import post_day_parties
 from .parties import apply_swap, plan_import
 from .views import AvailabilityView, RateListView
-from .votes import rateable_parties, slot_end, summary_counts
+from .votes import (FEEDBACK_CATEGORIES, feedback_counts, party_rating_counts, rateable_parties, slot_end,
+                    summary_counts)
 
 MAX_DRAFT_BYTES = 2_000_000
 
@@ -716,6 +717,72 @@ async def settings_clear(ctx, interaction, setting):
         await panel.remove_panel(ctx, interaction.guild_id)
     ctx.db.set_guild_setting(interaction.guild_id, setting, None)
     await say(interaction, "\n".join([f"Cleared **{SETTING_LABELS[setting]}**.", *settings_lines(ctx, interaction.guild_id)]))
+
+
+# ---------------------------------------------------------------- /feedback (organizers)
+
+def _name(ctx, pid):
+    player = ctx.db.get_player(pid)
+    return player["display_name"] if player else str(pid)
+
+
+async def feedback_summary(ctx, interaction):
+    """Organizers: per player, how the parties they were in were rated and who reported what. Never names a reporter."""
+    if not await require_organizer(ctx, interaction):
+        return
+    now, floor = ctx.now(), ctx.cfg["vote_floor"]
+    ratings = party_rating_counts(ctx.db, ctx.cfg, now)
+    reports, general = feedback_counts(ctx.db, ctx.cfg, now)
+    lines, hidden = [], 0
+    for pid in sorted(set(ratings) | set(reports), key=lambda p: _name(ctx, p).lower()):
+        parts = []
+        likes, dislikes = ratings.get(pid, (0, 0))
+        if likes + dislikes >= floor:
+            parts.append(f"parties 👍 {likes} / 👎 {dislikes}")
+        elif likes + dislikes:
+            hidden += 1
+        cats = reports.get(pid, {})
+        if cats:
+            parts.append("reports: " + ", ".join(f"{FEEDBACK_CATEGORIES[c][0].lower()} ×{n}" for c, n in
+                                                 sorted(cats.items(), key=lambda kv: -kv[1])))
+        if parts:
+            lines.append(f"**{_name(ctx, pid)}**: " + " · ".join(parts))
+    days = ctx.cfg["vote_expiry_days"]
+    head = (f"Party ratings and feedback from the last {days} days. Ratings of players in fewer than {floor} rated "
+            "parties are hidden. ×N is the number of different players who reported it; names of reporters are never shown. "
+            "Use /feedback player to read the notes.")
+    if general:
+        head += f"\n{general} report(s) named nobody: /feedback player without a player lists them."
+    if hidden:
+        lines.append(f"({hidden} more with fewer than {floor} ratings not shown)")
+    if not lines:
+        return await say(interaction, head + "\nNothing to show yet.")
+    first, *rest = _chunks([head, *lines])
+    await say(interaction, first)
+    for msg in rest:
+        await interaction.followup.send(msg, ephemeral=True)
+
+
+async def feedback_player(ctx, interaction, player=None):
+    """Organizers: the notes people sent about one player, or (no player) the ones that named nobody. Anonymous."""
+    if not await require_organizer(ctx, interaction):
+        return
+    now = ctx.now()
+    since = now - timedelta(days=ctx.cfg["vote_expiry_days"])
+    target = None if player is None else str(player.id)
+    rows = [r for r in ctx.db.feedback_rows(now, since) if r["target_id"] == target][::-1]
+    who = "feedback that named nobody" if target is None else f"feedback about {_name(ctx, target)}"
+    if not rows:
+        return await say(interaction, f"No {who} in the last {ctx.cfg['vote_expiry_days']} days.")
+    lines = [f"**{who.capitalize()}**, newest first (reporters are not shown):"]
+    for r in rows[:30]:
+        note = r["note"] or "no details"
+        lines.append(f"• {day_label(r['slot_key'][:10])} party {r['party_index'] + 1} · "
+                     f"{FEEDBACK_CATEGORIES[r['category']][0]}: {note}")
+    first, *rest = _chunks(lines)
+    await say(interaction, first)
+    for msg in rest:
+        await interaction.followup.send(msg, ephemeral=True)
 
 
 # ---------------------------------------------------------------- /debug (testing only)
