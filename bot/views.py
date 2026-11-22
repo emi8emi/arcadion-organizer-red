@@ -275,7 +275,7 @@ class RolesModal(discord.ui.Modal):
             options=[discord.SelectOption(label=role_label(r), value=r, default=r in have) for r in ROLES])
         self.add_item(discord.ui.Label(
             text="Roles", component=self.select,
-            description="A party has 1 main tank, 1 off tank, 1 regen, 1 shield, 2 melee, 1 ranged, 1 caster."))
+            description="Please pick all the roles you're willing to play."))
 
     async def on_submit(self, interaction):
         v = self.owner
