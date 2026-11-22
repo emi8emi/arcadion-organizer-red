@@ -263,6 +263,10 @@ def test_menu_limits_modal_saves_and_validates(ctx, make_run):
         assert not early.response.modals and "Pick prog first" in early.text
 
         ctx.db.upsert_player(5, "Ann", prog_index=11, now=NOW)
+        off = player(5)                                         # the per-run field is hidden unless enable_per_run_limit
+        await button.callback(off)
+        assert off.response.modals[0].per_run is None and len(off.response.modals[0].children) == 2
+        ctx.cfg["enable_per_run_limit"] = True
         press = player(5)
         await button.callback(press)
         modal = press.response.modals[0]
