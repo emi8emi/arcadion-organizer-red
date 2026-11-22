@@ -127,9 +127,15 @@ def validate_limits(per_day, per_run, drop, n_checkpoints):
 
 
 def checkpoint_label(checkpoints, idx):
+    """'9: P3 Gaols': the checkpoint number, its phase as P1, P2, ... and the point's name. Phases are numbered in
+    the order they first appear in the fight's checkpoint list, so the boss name is not shown."""
+    phases = []
+    for c in sorted(checkpoints, key=lambda c: c["idx"]):
+        if c["phase"] not in phases:
+            phases.append(c["phase"])
     for c in checkpoints:
         if c["idx"] == idx:
-            return f"{idx}: {c['phase']} {c['name']}"
+            return f"{idx}: P{phases.index(c['phase']) + 1} {c['name']}"
     return "not set"
 
 

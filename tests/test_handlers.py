@@ -513,3 +513,12 @@ def test_defaults_from_env_do_not_leak_into_another_server(ctx):
     assert is_organizer(ctx, player(6, role_ids=[4242], guild_id=200).user)
     assert not is_organizer(ctx, player(6, role_ids=[ORGANIZER_ROLE_ID], guild_id=200).user)
     assert "(bot default)" in "\n".join(settings_lines(ctx, 100)) and "(bot default)" not in "\n".join(settings_lines(ctx, 300))
+
+
+def test_checkpoints_are_labelled_by_phase_number_not_boss_name():
+    from bot.services import checkpoint_label
+    cps = [{"idx": 0, "phase": "Garuda", "name": "Fresh"}, {"idx": 1, "phase": "Garuda", "name": "Cleanse"},
+           {"idx": 2, "phase": "Ifrit", "name": "Fresh"}, {"idx": 3, "phase": "Titan", "name": "Gaols"}]
+    assert [checkpoint_label(cps, i) for i in range(4)] == ["0: P1 Fresh", "1: P1 Cleanse", "2: P2 Fresh", "3: P3 Gaols"]
+    assert checkpoint_label(list(reversed(cps)), 3) == "3: P3 Gaols"            # numbering follows idx, not list order
+    assert checkpoint_label(cps, 9) == "not set" and checkpoint_label(cps, None) == "not set"
