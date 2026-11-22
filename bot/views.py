@@ -269,7 +269,7 @@ class RolesModal(discord.ui.Modal):
         super().__init__(title="Roles you can play")
         self.owner = view
         player = view.ctx.db.get_player(view.user_id)
-        have = set(split_roles(player["roles"]) if player else [])
+        have = set(split_roles(player["roles"]) if player else ROLES)
         self.select = discord.ui.Select(
             min_values=1, max_values=len(ROLES),
             options=[discord.SelectOption(label=role_label(r), value=r, default=r in have) for r in ROLES])
