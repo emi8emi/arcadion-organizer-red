@@ -7,6 +7,7 @@ import discord
 
 from bot.services import MAX_PER_RUN
 from bot import handlers
+from bot.config import ROLES
 from bot.db import split_roles
 from bot.solver_io import build_signups, import_draft
 from bot.views import AvailabilityView, DoneButton, LimitsButton
@@ -210,8 +211,8 @@ def test_menu_saves_every_click(ctx, make_run):
         assert [o.value for o in view.day_select.options] == ["2026-11-01", "2026-11-02", "2026-11-03"]
         assert "Prog: **not set**" in msg["content"] and msg["content"].count("<t:") == 4   # the picked day's cutoff plus one per day
 
-        assert view.roles_button.style == discord.ButtonStyle.secondary
-        await pick_roles(view, player(5), ["melee", "main_tank"])        # the Roles modal; green once any role is set
+        assert view.roles_button.style == discord.ButtonStyle.success and view.roles_button.label == "Roles (7)"   # all by default
+        await pick_roles(view, player(5), ["melee", "main_tank"])        # the Roles modal narrows them down
         assert split_roles(ctx.db.get_player(5)["roles"]) == ["main_tank", "melee"]
         assert view.roles_button.style == discord.ButtonStyle.success and view.roles_button.label == "Roles (2)"
 
@@ -307,7 +308,25 @@ def test_menu_stops_saving_after_the_deadline(ctx, make_run, clock):
         late = player(5)
         await view.roles_button.callback(late)
         assert "closed for every day" in late.text and late.response.edits[-1]["view"] is None
-        assert ctx.db.get_player(5)["roles"] == ""
+        assert split_roles(ctx.db.get_player(5)["roles"]) == list(ROLES)   # untouched: still the default
+    run_async(scenario())
+
+
+def test_a_new_player_starts_with_every_role_and_a_chosen_set_is_kept(ctx, make_run):
+    make_run()
+
+    async def scenario():
+        it = player(7, "Bo")
+        await handlers.availability(ctx, it)
+        view = it.response.sent[0]["view"]
+        assert split_roles(ctx.db.get_player(7)["roles"]) == list(ROLES)
+        modal_roles = player(7)
+        await view.roles_button.callback(modal_roles)
+        assert {o.value for o in modal_roles.response.modals[0].select.options if o.default} == set(ROLES)
+        await pick_roles(view, player(7), ["regen"])
+        again = player(7)
+        await handlers.availability(ctx, again)                  # reopening must not put the other roles back
+        assert split_roles(ctx.db.get_player(7)["roles"]) == ["regen"]
     run_async(scenario())
 
 
