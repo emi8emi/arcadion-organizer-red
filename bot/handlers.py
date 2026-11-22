@@ -16,8 +16,8 @@ from . import confirmations as cf
 from . import progscore
 from .fflogs import FFLogsError
 from . import heatmap
-from .config import ROLES, ROOT, role_label
-from .db import DraftConflict, DuplicateRun, parse_iso, split_roles
+from .config import ROOT, role_label
+from .db import DraftConflict, DuplicateRun, parse_iso
 from .grid import day_cutoff, parse_date, parse_hm, parse_local_datetime, run_slots
 from .services import (snapshot_note, cutoff_of, day_label, day_state, day_summary_lines, limits_text, locked_prog_lines, open_days,
                        profile_text, server_setting, signup_open, tick_lines, valid_timezone, validate_limits)
@@ -303,9 +303,7 @@ async def availability(ctx, interaction, timezone=None):
         return await say(interaction, why)
     if timezone is not None and not valid_timezone(timezone):
         return await say(interaction, f"'{timezone}' is not a timezone name like America/Chicago.")
-    player = ctx.db.upsert_player(interaction.user.id, interaction.user.display_name, timezone=timezone, now=ctx.now())
-    if not split_roles(player["roles"]):          # a player who never picked roles starts with all of them; Roles narrows it
-        ctx.db.upsert_player(interaction.user.id, interaction.user.display_name, roles=ROLES, now=ctx.now())
+    ctx.db.upsert_player(interaction.user.id, interaction.user.display_name, timezone=timezone, now=ctx.now())
     view = AvailabilityView(ctx, run, interaction.user.id, interaction.user.display_name)
     await interaction.response.send_message(view.render(), view=view, ephemeral=True)
 

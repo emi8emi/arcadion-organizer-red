@@ -58,6 +58,7 @@ DEFAULTS = {
     "database_url": None,            # the Postgres database shared with the dashboard; set DATABASE_URL in .env
     "export_dir": "exports",
     "debug_commands": 0,
+    "enable_per_run_limit": False,   # show "Max parties per run" in the Limits form (env ALLOW_MAX_PER_RUN=1)
     "fflogs_client_id": None,
     "fflogs_client_secret": None
 }
@@ -87,5 +88,5 @@ def load_config(path=None, env=None):
     if env.get("DEBUG_COMMANDS"):
         cfg["debug_commands"] = env["DEBUG_COMMANDS"]
     if env.get("ALLOW_MAX_PER_RUN"):
-        cfg["allow_max_per_run"] = env["ALLOW_MAX_PER_RUN"]
+        cfg["enable_per_run_limit"] = env["ALLOW_MAX_PER_RUN"].strip().lower() in ("1", "true", "yes", "on")
     return cfg

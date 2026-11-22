@@ -9,6 +9,10 @@ from .services import (checkpoint_label, clip_message, day_accepts_signups, day_
                        profile_text, signup_open, snapshot_note, tick_lines, validate_limits)
 
 
+NO_ROLES_WARNING = ("⚠ **No roles selected yet.** Press **Roles** and pick every role you can play. "
+                    "Until you do, you will not be placed in any party.")
+
+
 class AvailabilityView(discord.ui.View):
     def __init__(self, ctx, run, user_id, display_name):
         super().__init__(timeout=900)
@@ -57,8 +61,8 @@ class AvailabilityView(discord.ui.View):
         prog = player["prog_index"] if player else None
         ticked = set(db.ticked_keys(self.run_id, self.user_id))
 
-        self.roles_button.label = f"Roles ({len(roles)})" if roles else "Roles"
-        self.roles_button.style = discord.ButtonStyle.success if roles else discord.ButtonStyle.secondary
+        self.roles_button.label = f"Roles ({len(roles)})" if roles else "Roles ⚠ none"
+        self.roles_button.style = discord.ButtonStyle.success if roles else discord.ButtonStyle.danger
         
         self.prog_select.options = [
             discord.SelectOption(label=checkpoint_label(self.checkpoints, c["idx"])[:100], value=str(c["idx"]),
@@ -135,7 +139,8 @@ class AvailabilityView(discord.ui.View):
                 day_lines.append(f"{day_label(r['day'])}: {discord.utils.format_dt(cutoff_of(r), 'R')}")
             else:
                 day_lines.append(f"{day_label(r['day'])}: closed")
-        parts = [
+        parts = [] if split_roles(player["roles"] if player else "") else [NO_ROLES_WARNING]
+        parts += [
             f"**{run['name']}** | Editing **{day_label(self.day)}** (closes {discord.utils.format_dt(cutoff_of(picked), 'R')})",
             f"Prog: **{checkpoint_label(self.checkpoints, prog)}** | {self._character_line()}",
             f"Ticked: {len(keys)} slots | Cutoffs: " + " | ".join(day_lines)
@@ -258,7 +263,11 @@ class DoneButton(discord.ui.Button):
     async def callback(self, interaction):
         v = self.view
         v.stop()
+        player = v.ctx.db.get_player(v.user_id)
         done = "\n\nSaved. Run /availability to edit."
+        if not split_roles(player["roles"] if player else ""):
+            done = "\n\n⚠ Saved, but you still have **no roles selected**, so you will not be placed in a party. " \
+                   "Run /availability and press Roles."
         await interaction.response.edit_message(content=v.render(1990 - len(done)) + done, view=None)
 
 
