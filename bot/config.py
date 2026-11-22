@@ -86,4 +86,6 @@ def load_config(path=None, env=None):
         cfg["fflogs_client_secret"] = env["FFLOGS_CLIENT_SECRET"]
     if env.get("DEBUG_COMMANDS"):
         cfg["debug_commands"] = env["DEBUG_COMMANDS"]
+    if env.get("ALLOW_MAX_PER_RUN"):
+        cfg["allow_max_per_run"] = env["ALLOW_MAX_PER_RUN"]
     return cfg

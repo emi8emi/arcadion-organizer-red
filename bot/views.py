@@ -287,7 +287,6 @@ class RolesModal(discord.ui.Modal):
             v.ctx.db.upsert_player(v.user_id, v.display_name, roles=sorted(roles), now=v.ctx.now())
             await v.refresh_after_edit(interaction)
 
-
 class LimitsModal(discord.ui.Modal):
     def __init__(self, view):
         super().__init__(title="Limits and playing lower")
@@ -295,44 +294,99 @@ class LimitsModal(discord.ui.Modal):
         db = view.ctx.db
         lim = db.get_limits(view.run_id, view.user_id, view.ctx.cfg)
         prog = db.get_player(view.user_id)["prog_index"]
-        self.per_day = discord.ui.TextInput(label="Max parties per day", default=str(lim["max_per_day"]),
-                                            max_length=2)
-        self.per_run = discord.ui.TextInput(label="Max parties for the whole run", default=str(lim["max_per_run"]),
-                                            max_length=2)
+
+        self.per_day = discord.ui.TextInput(
+            label="Max parties per day",
+            default=str(lim["max_per_day"]),
+            max_length=2
+        )
+
+        self.per_run = None
+        if view.ctx.cfg.get("enable_per_run_limit", False):
+            self.per_run = discord.ui.TextInput(
+                label="Max parties per run",
+                default=str(lim["max_per_run"]),
+                max_length=2
+            )
+
         reachable = [c for c in view.checkpoints if c["idx"] <= prog][-25:]
         current_min = max(prog - lim["drop_checkpoints"], reachable[0]["idx"])
+
         self.min_select = discord.ui.Select(
-            min_values=1, max_values=1,
-            options=[discord.SelectOption(
-                label=(checkpoint_label(view.checkpoints, c["idx"]) + (" (my prog: no lower)" if c["idx"] == prog else ""))[:100],
-                value=str(c["idx"]), default=c["idx"] == current_min) for c in reachable])
-        for item in (self.per_day, self.per_run,
-                     discord.ui.Label(text="Lowest checkpoint you accept", component=self.min_select,
-                                      description="Pick your own prog if you never want to play lower.")):
-            self.add_item(item)
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(
+                    label=(
+                        checkpoint_label(view.checkpoints, c["idx"])
+                        + (" (my prog: no lower)" if c["idx"] == prog else "")
+                    )[:100],
+                    value=str(c["idx"]),
+                    default=c["idx"] == current_min
+                )
+                for c in reachable
+            ]
+        )
+
+        self.add_item(self.per_day)
+
+        if self.per_run is not None:
+            self.add_item(self.per_run)
+
+        self.add_item(
+            discord.ui.Label(
+                text="Lowest checkpoint you accept",
+                component=self.min_select,
+                description="Pick your own prog if you never want to play lower."
+            )
+        )
 
     async def on_submit(self, interaction):
         v = self.owner
+
         try:
-            per_day, per_run = (int(x.value) for x in (self.per_day, self.per_run))
+            per_day = int(self.per_day.value)
+            per_run = int(self.per_run.value) if self.per_run is not None else 99
         except ValueError:
-            await interaction.response.send_message("Those need to be whole numbers.", ephemeral=True)
+            await interaction.response.send_message(
+                "Those need to be whole numbers.",
+                ephemeral=True
+            )
             return
+
         player = v.ctx.db.get_player(v.user_id)
         prog = player["prog_index"] if player else None
+
         if prog is None:
-            await interaction.response.send_message("Pick your prog checkpoint first, then set your limits.", ephemeral=True)
+            await interaction.response.send_message(
+                "Pick your prog checkpoint first, then set your limits.",
+                ephemeral=True
+            )
             return
+
         drop = max(0, prog - int(self.min_select.values[0]))
+
         err = validate_limits(per_day, per_run, drop, len(v.checkpoints))
         if err:
             await interaction.response.send_message(err, ephemeral=True)
             return
+
         if await v.guard(interaction):
-            v.ctx.db.upsert_player(v.user_id, v.display_name, now=v.ctx.now())
-            v.ctx.db.set_limits(v.run_id, v.user_id, v.ctx.cfg, max_per_day=per_day, max_per_run=per_run,
-                                drop_checkpoints=drop)
+            v.ctx.db.upsert_player(
+                v.user_id,
+                v.display_name,
+                now=v.ctx.now()
+            )
+            v.ctx.db.set_limits(
+                v.run_id,
+                v.user_id,
+                v.ctx.cfg,
+                max_per_day=per_day,
+                max_per_run=per_run,
+                drop_checkpoints=drop
+            )
             await v.refresh_after_edit(interaction)
+
 
 
 # ---------------------------------------------------------------- rating (private, ephemeral only)
