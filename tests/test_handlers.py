@@ -14,11 +14,17 @@ from conftest import (pick_roles, add_party_players, draft_for_day, NOW, ORGANIZ
                       organizer, player, run_async)
 
 
-def create_args(**kw):
-    args = dict(name="UWU week 1", content="Ultima Weapon (Ultimate)", start_date="2026-11-01",
-                end_date="2026-11-03")
-    args.update(kw)
-    return args
+def create_spec(**kw):
+    """An event spec (bot/events.py): three days, everything else default."""
+    spec = {"name": "UWU week 1", "content": "Ultima Weapon (Ultimate)",
+            "days": {"from": "2026-11-01", "to": "2026-11-03"}}
+    spec.update(kw)
+    return spec
+
+
+def create(ctx, it, **kw):
+    run_async(handlers.submit_event(ctx, it, create_spec(**kw)))
+    return it
 
 
 def do(ctx, handler, it, *args, **kwargs):
@@ -31,10 +37,9 @@ def do(ctx, handler, it, *args, **kwargs):
 def test_organizer_commands_refuse_regular_players(ctx, make_run):
     make_run()
     for handler, args in [(handlers.run_create, ()), (handlers.run_open, ()), (handlers.run_close, ()),
-                          (handlers.run_status, ()), (handlers.draft_export, ())]:
+                          (handlers.run_status, ()), (handlers.run_spec, ()), (handlers.draft_export, ())]:
         it = player(5)
-        kwargs = create_args() if handler is handlers.run_create else {}
-        do(ctx, handler, it, *args, **kwargs)
+        do(ctx, handler, it, *args)
         assert "Only organizers" in it.text, handler.__name__
     it = do(ctx, handlers.draft_import, player(5), FakeAttachment(b"{}"))
     assert "Only organizers" in it.text
@@ -44,24 +49,26 @@ def test_organizer_commands_refuse_regular_players(ctx, make_run):
 
 def test_organizer_role_id_counts_as_organizer(ctx):
     ctx.cfg["organizer_role_id"] = ORGANIZER_ROLE_ID
-    it = do(ctx, handlers.run_create, player(5, role_ids=(ORGANIZER_ROLE_ID,)), **create_args())
-    assert "Created" in it.text
-    it = do(ctx, handlers.run_create, player(6, role_ids=(1,)), **create_args(name="Other"))
+    it = do(ctx, handlers.run_create, player(5, role_ids=(ORGANIZER_ROLE_ID,)))          # no file: opens the form
+    assert it.response.sent and "New event" in it.response.sent[0]["content"]
+    it = do(ctx, handlers.run_create, player(6, role_ids=(1,)))
     assert "Only organizers" in it.text
 
 
 # ---------------------------------------------------------------- /run
 
-def test_run_create_builds_the_slot_grid(ctx):
-    it = do(ctx, handlers.run_create, organizer(), **create_args())
-    assert "33 candidate slots" in it.text and "3 days" in it.text and "<t:" in it.text
+def test_creating_an_event_builds_the_slot_grid(ctx):
+    it = create(ctx, organizer())
+    assert "33 candidate slots" in it.text and "3 days" in it.text and "Created" in it.text
     run = ctx.db.get_run(100, "uwu week 1")
     assert run["status"] == "draft" and run["created_by"] == "1"
     assert len(ctx.db.run_slots(run["id"])) == 33
+    assert run["spec"]["name"] == "UWU week 1" and [d["date"] for d in run["spec"]["days"]] == [
+        "2026-11-01", "2026-11-02", "2026-11-03"]                              # the spec is kept on the run
 
 
-def test_run_create_sets_one_cutoff_per_day_the_evening_before(ctx):
-    do(ctx, handlers.run_create, organizer(), **create_args())
+def test_creating_an_event_sets_one_cutoff_per_day_the_evening_before(ctx):
+    create(ctx, organizer())
     run = ctx.db.get_run(100, "uwu week 1")
     # 23:59 Eastern the evening before; 2026-11-01 is the day the clocks fall back (EDT before it, EST after)
     assert {d["day"]: d["cutoff_utc"] for d in ctx.db.run_days(run["id"])} == {
@@ -70,63 +77,73 @@ def test_run_create_sets_one_cutoff_per_day_the_evening_before(ctx):
         "2026-11-03": "2026-11-03T04:59:00+00:00"}
 
 
-def test_run_create_cutoff_options(ctx):
-    do(ctx, handlers.run_create, organizer(), **create_args(cutoff_time="20:30", cutoff_days_before=2))
+def test_cutoff_options(ctx):
+    create(ctx, organizer(), cutoff={"time": "20:30", "days_before": 2})
     run = ctx.db.get_run(100, "uwu week 1")
     assert ctx.db.run_day(run["id"], "2026-11-03")["cutoff_utc"] == "2026-11-02T01:30:00+00:00"   # Nov 1 20:30 EST
-    it = do(ctx, handlers.run_create, organizer(), **create_args(name="Same day", cutoff_time="07:00",
-                                                                  cutoff_days_before=0))
-    assert "the day itself" in it.text
+    it = create(ctx, organizer(), name="Same day", cutoff={"time": "07:00", "days_before": 0})
+    assert "Created" in it.text
     assert ctx.db.run_day(ctx.db.get_run(100, "same day")["id"], "2026-11-02")["cutoff_utc"] == "2026-11-02T12:00:00+00:00"
 
 
-def test_run_create_cutoff_can_use_another_timezone(ctx):
-    do(ctx, handlers.run_create, organizer(), **create_args(timezone="America/Sao_Paulo"))
+def test_cutoff_can_use_another_timezone(ctx):
+    create(ctx, organizer(), cutoff_timezone="America/Sao_Paulo")
     run = ctx.db.get_run(100, "uwu week 1")
     assert ctx.db.run_day(run["id"], "2026-11-02")["cutoff_utc"] == "2026-11-02T02:59:00+00:00"   # Nov 1 23:59 BRT (UTC-3)
 
 
-def test_run_create_allows_tomorrow_with_tonights_cutoff(ctx):
-    from datetime import date as _date
-    tomorrow = (_date.today() + timedelta(days=1)).isoformat()
-    it = do(ctx, handlers.run_create, organizer(),
-            **create_args(start_date="tomorrow", end_date="tomorrow"))
-    assert "Created" in it.text and "1 days" in it.text
-    run = ctx.db.get_run(100, "uwu week 1")
-    assert [d["day"] for d in ctx.db.run_days(run["id"])] == [tomorrow]
-
-
-def test_run_create_warns_when_no_reminder_channel_is_set(ctx):
-    assert "No reminder channel" in do(ctx, handlers.run_create, organizer(), **create_args()).text
+def test_warns_when_no_reminder_channel_is_set(ctx):
+    assert "No reminder channel" in create(ctx, organizer()).text
     ctx.cfg["reminder_channel_id"] = 123
-    assert "No reminder channel" not in do(ctx, handlers.run_create, organizer(), **create_args(name="B")).text
+    assert "No reminder channel" not in create(ctx, organizer(), name="B").text
 
 
-def test_run_create_can_limit_the_candidate_slots(ctx):
-    it = do(ctx, handlers.run_create, organizer(), **create_args(earliest_start="17:00", latest_start="20:00"))
-    assert "9 candidate slots" in it.text
+def test_the_start_window_limits_the_candidate_slots(ctx):
+    it = create(ctx, organizer(), first_start="17:00", last_start="20:00")
+    assert "9 candidate slots" in it.text                                        # 17:00, 18:30 and 20:00 on three days
 
 
-def test_run_create_rejects_bad_input(ctx, make_run):
+def test_creating_rejects_bad_input_and_says_everything_wrong_at_once(ctx, make_run):
     cases = [
         (dict(content="Some Other Raid"), "I don't know the content"),
-        (dict(start_date="11/01/2026"), "Dates look like"),
-        (dict(end_date="2026-10-30"), "end date is before"),
-        (dict(end_date="2026-12-30"), "at most 14 days"),
-        (dict(cutoff_time="abc"), "cutoff time looks like"),
-        (dict(cutoff_days_before=9), "between 0"),
-        (dict(cutoff_days_before=0), "before that day's first slot"),       # 23:59 on the day itself
-        (dict(earliest_start="5pm"), "look like 17:00"),
+        (dict(days={"from": "11/01/2026", "to": "2026-11-03"}), "days.from must be a date"),
+        (dict(days={"from": "2026-11-03", "to": "2026-10-30"}), "days.to is before"),
+        (dict(days={"from": "2026-11-01", "to": "2026-12-30"}), "at most 14 days"),
+        (dict(cutoff={"time": "abc"}), "cutoff.time must look like"),
+        (dict(cutoff={"days_before": 9}), "from 0"),
+        (dict(cutoff={"days_before": 0}), "before that day's first slot"),       # 23:59 on the day itself
+        (dict(first_start="5pm"), "first_start must look like"),
         (dict(name=" "), "name of 1 to 60"),
-        (dict(earliest_start="23:30", latest_start="23:45"), "no slots"),
+        (dict(first_start="23:30", last_start="23:45", slot_minutes=90), None),   # one slot is fine
+        (dict(first_start="21:00", last_start="20:00"), "last_start is before first_start"),
+        (dict(days=[]), "at least one day"),
+        (dict(days=["2026-11-01", "2026-11-01"]), "listed twice"),
+        (dict(slot_minutes=5), "between 15 and 480"),
+        (dict(version=2), "version 1"),
+        (dict(colour="red"), "Unknown field"),
     ]
     for override, message in cases:
-        it = do(ctx, handlers.run_create, organizer(), **create_args(**override))
-        assert message in it.text, (override, it.text)
-    assert ctx.db.get_run(100) is None                                  # nothing was created
+        it = create(ctx, organizer(), **{"name": "X" + str(len(ctx.db.conn.execute("SELECT id FROM runs").fetchall())),
+                                         **override})
+        if message:
+            assert message in it.text, (override, it.text)
+    # several problems are reported together
+    it = create(ctx, organizer(), name=" ", content="Nope", first_start="x")
+    assert it.text.count("•") >= 3
     make_run("Taken")
-    it = do(ctx, handlers.run_create, organizer(), **create_args(name="taken"))
-    assert "already exists" in it.text
+    assert "already exists" in create(ctx, organizer(), name="taken").text
+
+
+def test_an_uploaded_json_file_creates_the_event(ctx):
+    import json
+    it = do(ctx, handlers.run_create, organizer(), FakeAttachment(json.dumps(create_spec()).encode()))
+    assert "Created" in it.text and ctx.db.get_run(100, "uwu week 1") is not None
+    bad = do(ctx, handlers.run_create, organizer(), FakeAttachment(b"{nope"))
+    assert "not valid JSON" in bad.text
+    big = do(ctx, handlers.run_create, organizer(), FakeAttachment(b"{}", size=10**7))
+    assert "too big" in big.text
+    empty = do(ctx, handlers.run_create, organizer(), FakeAttachment(b"{}"))
+    assert "I could not create the event" in empty.text and "name" in empty.text
 
 
 def test_open_and_close_lifecycle(ctx, make_run):

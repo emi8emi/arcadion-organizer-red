@@ -130,7 +130,7 @@ Nothing is solved automatically: at each cutoff the bot nags the organizers unti
 
 | Step | Who | What |
 | --- | --- | --- |
-| 1 | organizer | `/run create name content start_date end_date [cutoff_time] [cutoff_days_before] [earliest_start] [latest_start] [timezone]` makes a draft run, its slot grid and one cutoff per day. Default: each day closes at `cutoff_time` (config, `23:59`) `cutoff_days_before` (config, `1`) days earlier, in the run's timezone, so Monday closes Sunday 23:59. A run may start tomorrow with tonight as the first cutoff. A day already past its cutoff when the run opens starts closed. The create is refused if a cutoff is not before that day's first slot. |
+| 1 | organizer | `/run create` opens a private **guided form** with a live preview: **Basics** (name, fight, dates), tick the days of the range, **Times** (first and last slot start, slot length), **Cutoff** (time, days before, timezone), a per-day menu to change one day's window, slot length or exact cutoff, and **Announce** (channel, role to ping, message, when to open by itself). Nothing is saved until **Create event**, which stays disabled while the preview lists problems. `/run create` with a JSON file attached does the same from an [event spec](#event-spec-json); `/run spec` sends an existing event's spec back as a file. The result is a draft run with its slot grid and one cutoff per day (default: `cutoff_time` (`23:59`) `cutoff_days_before` (`1`) days earlier, so Monday closes Sunday 23:59). A day already past its cutoff when the run opens starts closed. Creating is refused if a cutoff is not before that day's first slot. |
 | 2 | organizer | `/helper grant @person` for each helper (once per fight). |
 | 3 | organizer | `/run open` starts signups. Only one run can be open at a time. |
 | 4 | players | `/availability`: pick roles (the **Roles** button opens a menu where you tick every role you can play; until you pick some the menu shows a red warning and the player is not placed in any party), prog checkpoint (shown prominently, since it changes), then a day and its slots. Each day shows when it closes; a closed day is read-only. The **Limits** button sets max per day, max per run and how many checkpoints lower they accept. `/limits` and `/myschedule` show the same. Roles, prog and limits stay editable while any day is open. |
@@ -205,6 +205,48 @@ day: display name, roles, prog and their effective limits (defaults included).
 Config keys: `cutoff_time`, `cutoff_days_before`, `reminder_channel_id` (env `REMINDER_CHANNEL_ID`),
 `reminder_interval_minutes`, `organizer_role_id`, `parties_channel_id` (env `PARTIES_CHANNEL_ID`),
 `vote_window_hours` (72), `vote_expiry_days` (90), `vote_floor` (3), `feedback_weights`, `compat_min_parties` (3), `compat_prior` (2), `confirm_reminder_hours` (3), `dm_on_confirm` (true).
+
+### Event spec (JSON)
+
+Every event is one JSON document, version 1. The guided form builds it, `/run create` with a file reads it, `/run spec`
+exports it, the dashboard can write it, and it is kept on the run (`runs.spec`, migration 0006). The shape is in
+[`docs/event-spec.schema.json`](docs/event-spec.schema.json); `bot/events.py` `resolve` does the full check and lists
+every problem at once.
+
+```json
+{
+  "version": 1,
+  "name": "UWU week 1",
+  "content": "Ultima Weapon (Ultimate)",
+  "first_start": "17:00",
+  "last_start": "20:00",
+  "slot_minutes": 90,
+  "cutoff": {"time": "23:59", "days_before": 1},
+  "cutoff_timezone": "America/Sao_Paulo",
+  "days": [
+    "2026-11-02",
+    {"date": "2026-11-04", "first_start": "19:00", "last_start": "21:00", "slot_minutes": 120,
+     "cutoff_at": "2026-11-03 18:00"}
+  ],
+  "announce": {"channel_id": "123", "ping_role_id": "456", "message": "Signups are open!",
+               "open_at": "2026-11-01 12:00"}
+}
+```
+
+* Only `name`, `content` and `days` are required. `days` is a list (a date, or an object that can override
+  `first_start`, `last_start`, `slot_minutes` and `cutoff_at` for that day) or a range `{"from", "to"}`. Pick any
+  days: skip some, or spread them over weeks, up to `max_run_days`.
+* A day's slot starts are `first_start`, then every `slot_minutes`, up to and including `last_start`. They no longer
+  have to sit on the old 08:00 grid. Slot times are in the grid timezone (`timezone` in `config.json`);
+  `cutoff_at`, `cutoff.time` and `open_at` are read in `cutoff_timezone` (default: the grid timezone).
+* Unknown fields are refused, so a typo does not silently do nothing.
+* `announce`: when the event opens (`/run open`, or by itself at `open_at`) the bot posts the message in `channel_id`,
+  pinging `ping_role_id`, with each day's cutoff, once. An `open_at` that cannot happen (another event is still open,
+  every day is past its cutoff) leaves a draft and tells the reminder channel. The bot needs View Channel and Send
+  Messages there, and Mention Roles to ping.
+* **For the dashboard:** write this JSON, or call the same resolver (`bot/events.py` has no Discord dependency), and
+  insert the run through `runs`, `run_days` and `slots` as `create_run` does, storing the spec in `runs.spec`.
+  Runs made before 0006 have `spec` NULL; `spec_from_run` rebuilds one.
 
 ### Ratings and feedback: how the party went
 

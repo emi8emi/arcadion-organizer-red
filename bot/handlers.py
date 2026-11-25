@@ -12,13 +12,14 @@ from zoneinfo import available_timezones
 import discord
 
 from . import characters as ch
+from . import events, openings
 from . import confirmations as cf
 from . import progscore
 from .fflogs import FFLogsError
 from . import heatmap
 from .config import ROOT, role_label
 from .db import DraftConflict, DuplicateRun, parse_iso
-from .grid import day_cutoff, parse_date, parse_hm, parse_local_datetime, run_slots
+from .grid import parse_date, parse_local_datetime
 from .services import (snapshot_note, cutoff_of, day_label, day_state, day_summary_lines, limits_text, locked_prog_lines, open_days,
                        profile_text, server_setting, signup_open, tick_lines, valid_timezone, validate_limits)
 from .snapshots import ensure_snapshot
@@ -94,84 +95,61 @@ async def find_day(ctx, interaction, run, day):
     return row
 
 
-async def run_create(ctx, interaction, name, content, start_date, end_date,
-                     earliest_start=None, latest_start=None, timezone=None,
-                     cutoff_time=None, cutoff_days_before=None):
-    if not await require_organizer(ctx, interaction):
-        return
-    db = ctx.db
+MAX_SPEC_BYTES = 100_000
 
-    # 1. Validate user_tz and fall back to ctx.cfg["timezone"] if invalid/missing
-    if timezone and timezone.strip() in available_timezones():
-        tz = timezone.strip()
-    else:
-        # Optional: Send a warning to the user if they provided a broken timezone string
-        if timezone:
-            await interaction.response.send_message(
-                f"⚠️ `{timezone}` is not a valid timezone. Falling back to default: `{ctx.cfg['timezone']}`",
-                ephemeral=True
-            )
-        tz = ctx.cfg["timezone"]
 
-    name = name.strip()
-    if not name or len(name) > 60:
-        return await say(interaction, "Give the run a name of 1 to 60 characters.")
-    fight = db.find_fight(content)
-    if fight is None:
-        known = ", ".join(f["name"] for f in db.fights())
-        return await say(interaction, f"I don't know the content '{content}'. Known: {known}.")
+async def submit_event(ctx, interaction, spec):
+    """Check an event spec and create the run (a draft). The one way events are created: the guided form and
+    an attached JSON file both end here. Returns True when the run was created; the reply says what happened."""
+    plan, errors = events.resolve(spec, ctx.cfg, ctx.grid, ctx.db, ctx.now())
+    if plan is None:
+        await say(interaction, "I could not create the event:\n" + "\n".join(f"• {e}" for e in errors[:15]))
+        return False
     try:
-        start, end = parse_date(start_date), parse_date(end_date)
-    except ValueError:
-        return await say(interaction, "Dates look like 2026-11-02 (year-month-day). You can also use today, tomorrow and yesterday.")
-    if end < start:
-        return await say(interaction, "The end date is before the start date.")
-    if (end - start).days + 1 > ctx.cfg["max_run_days"]:
-        return await say(interaction, f"Runs can be at most {ctx.cfg['max_run_days']} days long.")
-    try:
-        cutoff_hm = parse_hm(cutoff_time or ctx.cfg["cutoff_time"])
-    except ValueError:
-        return await say(interaction, "The cutoff time looks like 23:59 (the clock time each day's signups close).")
-    days_before = ctx.cfg["cutoff_days_before"] if cutoff_days_before is None else cutoff_days_before
-    if not 0 <= days_before <= 7:
-        return await say(interaction, "Cutoff days before must be between 0 (the day itself) and 7.")
-    try:
-        for hm in (earliest_start, latest_start):
-            if hm:
-                parse_hm(hm)
-    except ValueError:
-        return await say(interaction, "Earliest/latest start look like 17:00.")
-
-    slots = run_slots(start, end, ctx.grid, earliest_start, latest_start)
-    if not slots:
-        return await say(interaction, "Those dates and start times leave no slots.")
-    first_on = {}
-    for sl in slots:
-        first_on.setdefault(sl.key[:10], sl.start_utc)
-    cutoffs = {}
-    for day, first_start in first_on.items():
-        cutoffs[day] = day_cutoff(parse_date(day), cutoff_hm, days_before, tz)
-        if cutoffs[day] >= first_start:
-            return await say(interaction, f"The cutoff for {day_label(day)} "
-                                          f"({discord.utils.format_dt(cutoffs[day], 'F')}) must be before that day's first slot. "
-                                          "Use a cutoff earlier in the day, or more days before.")
-    try:
-        db.create_run(guild_id=interaction.guild_id, name=name, fight_id=fight["id"], start_date=start,
-                      end_date=end, cutoffs=cutoffs, slots=slots, created_by=interaction.user.id,
-                      earliest=earliest_start, latest=latest_start, now=ctx.now())
+        ctx.db.create_run(guild_id=interaction.guild_id, name=plan.name, fight_id=plan.fight["id"],
+                          start_date=plan.days[0].day, end_date=plan.days[-1].day, cutoffs=plan.cutoffs,
+                          slots=plan.slots, created_by=interaction.user.id, now=ctx.now(), spec=plan.spec,
+                          open_at=plan.open_at_utc)
     except DuplicateRun:
-        return await say(interaction, f"A run called '{name}' already exists here.")
-    ordered = [cutoffs[d] for d in sorted(cutoffs)]
-    when = ("the evening before" if days_before == 1 else "the day itself" if days_before == 0
-            else f"{days_before} days before")
-    lines = [f"Created **{name}** for {fight['name']}: {len(cutoffs)} days, {len(slots)} candidate slots. "
-             f"Each day's signups close at {cutoff_hm.strftime('%H:%M')} ({tz}) {when}: the first is "
-             f"{discord.utils.format_dt(ordered[0], 'F')}, the last {discord.utils.format_dt(ordered[-1], 'F')}. "
-             "It is a draft; use /run open to start signups."]
+        await say(interaction, f"A run called '{plan.name}' already exists here.")
+        return False
+    lines = ["Created the event as a draft.", events.describe(plan)]
+    if plan.open_at_utc is None:
+        lines.append("Use /run open to start signups.")
     if not server_setting(ctx, interaction.guild_id, "reminder_channel_id"):
         lines.append("⚠ No reminder channel is set (use /settings set), "
                      "so the bot will not remind organizers to run /draft export after each cutoff.")
-    await say(interaction, "\n".join(lines))
+    await say(interaction, "\n".join(lines)[:1990])
+    return True
+
+
+async def run_create(ctx, interaction, spec_file=None):
+    """Organizers: with a JSON file, create the event from it; without, start the guided form."""
+    if not await require_organizer(ctx, interaction):
+        return
+    if spec_file is None:
+        from . import event_form
+        return await event_form.start(ctx, interaction)
+    if spec_file.size > MAX_SPEC_BYTES:
+        return await say(interaction, "That file is too big to be an event spec.")
+    try:
+        spec = json.loads((await spec_file.read()).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return await say(interaction, "That file is not valid JSON. /run spec shows the format; it is also in the README.")
+    await submit_event(ctx, interaction, spec)
+
+
+async def run_spec(ctx, interaction, name=None):
+    """Organizers: an event's JSON spec as a file, to edit and use with /run create, or for the dashboard."""
+    if not await require_organizer(ctx, interaction):
+        return
+    run = await find_run(ctx, interaction, name)
+    if run is None:
+        return
+    spec = events.spec_from_run(ctx.db, run, ctx.cfg, ctx.grid)
+    file = discord.File(io.BytesIO(json.dumps(spec, indent=2, ensure_ascii=False).encode("utf-8")),
+                        filename=f"{slug(run['name'])}.event.json")
+    await say(interaction, f"The spec of **{run['name']}**. Change the name, then upload it with /run create.", file=file)
 
 
 async def run_open(ctx, interaction, name=None):
@@ -180,28 +158,9 @@ async def run_open(ctx, interaction, name=None):
     run = await find_run(ctx, interaction, name)
     if run is None:
         return
-    if run["status"] == "open":
-        return await say(interaction, f"**{run['name']}** is already open.")
-    other = ctx.db.open_run(interaction.guild_id)
-    stale = ""
-    if other:
-        if open_days(ctx, other):
-            return await say(interaction, f"**{other['name']}** is still open. Close it first with /run close.")
-        ctx.db.set_run_status(other["id"], "closed")           # every day of it is past its cutoff anyway
-        stale = f" (I closed **{other['name']}**: all its days were already past their cutoffs.)"
-    rows = ctx.db.run_days(run["id"])
-    now = ctx.now()
-    still_open = [r for r in rows if now < cutoff_of(r)]
-    if not still_open:
-        return await say(interaction, "Every day of this run is already past its cutoff, so nobody could sign up. "
-                                      "Move a day with /run extend first.")
-    ctx.db.set_run_status(run["id"], "open")
-    nxt = discord.utils.format_dt(cutoff_of(still_open[0]), "F")
-    closed = len(rows) - len(still_open)
-    await say(interaction, f"**{run['name']}** is open. Players sign up with /availability; "
-                           f"{len(still_open)} of {len(rows)} days take signups"
-                           + (f" ({closed} already closed)" if closed else "")
-                           + f", the next cutoff is {day_label(still_open[0]['day'])}, {nxt}." + stale)
+    await interaction.response.defer(ephemeral=True)             # posting the announcement can take a moment
+    _, text = await openings.open_run(ctx, interaction.guild_id, run)
+    await say(interaction, text)
 
 
 async def run_close(ctx, interaction, name=None, day=None):

@@ -40,29 +40,15 @@ class RunGroup(app_commands.Group):
         super().__init__(name="run", description="Organizers: manage signup runs", guild_only=True)
         self.ctx = ctx
 
-    @app_commands.command(name="create", description="Create a run (draft) with its slot grid")
-    @app_commands.autocomplete(timezone=timezone_autocomplete)
-    @app_commands.describe(
-        name="Name of the run, e.g. UWU week 1",
-        content="The fight, e.g. Ultima Weapon (Ultimate)",
-        start_date="First day, like 2026-11-02",
-        end_date="Last day (inclusive), like 2026-11-08",
-        earliest_start="Optional: first slot start to offer, like 17:00",
-        latest_start="Optional: last slot start to offer, like 20:00",
-        timezone="Optional: Iana timezone (e.g., America/New_York)",
-        cutoff_time="Optional: clock time each day's signups close, like 23:59 (default from config.json)",
-        cutoff_days_before="Optional: days before each day that signups close (default 1 = the evening before)")
-    async def create(self, interaction: discord.Interaction, name: str, content: str, start_date: str,
-                     end_date: str, earliest_start: Optional[str] = None,
-                     latest_start: Optional[str] = None, timezone: Optional[str] = None,
-                     cutoff_time: Optional[str] = None, cutoff_days_before: Optional[int] = None):
-        await handlers.run_create(self.ctx, interaction, name, content, start_date, end_date,
-                                  earliest_start, latest_start, timezone, cutoff_time, cutoff_days_before)
+    @app_commands.command(name="create", description="Create an event: a guided form, or upload an event JSON file")
+    @app_commands.describe(spec="Optional: an event JSON file (see /run spec) instead of the form")
+    async def create(self, interaction: discord.Interaction, spec: Optional[discord.Attachment] = None):
+        await handlers.run_create(self.ctx, interaction, spec)
 
-    @create.autocomplete("content")
-    async def create_content_choices(self, interaction: discord.Interaction, current: str):
-        return [app_commands.Choice(name=f["name"], value=f["name"]) for f in self.ctx.db.fights()
-                if current.lower() in f["name"].lower()][:25]
+    @app_commands.command(name="spec", description="Get an event's JSON spec as a file (to copy it or edit it)")
+    @app_commands.describe(name="Run name (default: the newest run)")
+    async def spec(self, interaction: discord.Interaction, name: Optional[str] = None):
+        await handlers.run_spec(self.ctx, interaction, name)
 
     @app_commands.command(name="open", description="Open a run for signups")
     @app_commands.describe(name="Run name (default: the newest run)")
