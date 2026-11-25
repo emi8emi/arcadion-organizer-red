@@ -78,7 +78,9 @@ def parse_range(text):
 
 
 def _input(label, value="", placeholder=None, required=False, max_length=40, paragraph=False):
-    return discord.ui.TextInput(label=label, default=value or None, placeholder=placeholder, required=required,
+    """A text box for use inside a discord.ui.Label. Discord refuses a label on the TextInput itself (the Label
+    holds the text), so `label` is only kept as the first argument to read well at the call site."""
+    return discord.ui.TextInput(default=value or None, placeholder=placeholder, required=required,
                                 max_length=max_length,
                                 style=discord.TextStyle.paragraph if paragraph else discord.TextStyle.short)
 

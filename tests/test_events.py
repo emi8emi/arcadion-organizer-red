@@ -362,3 +362,25 @@ def test_parse_range():
         event_form.parse_range("2026-11-05 to 2026-11-02")
     with pytest.raises(ValueError):
         event_form.parse_range("whenever")
+
+
+def test_no_text_box_inside_a_label_has_a_label_of_its_own(ctx):
+    """Discord answers 400 'Cannot set label on a TextInput in a Label component' otherwise (it did, live)."""
+    view, _ = open_form(ctx)
+
+    async def scenario():
+        modals = []
+        for label in ("Basics", "Times", "Cutoff", "Announce"):
+            modals.append((await press(view, next(c for c in view.children if getattr(c, "label", "") == label))).response.modals[0])
+        from datetime import date
+        view.draft.days, view.draft.first, view.draft.last = ["2026-11-02"], date(2026, 11, 2), date(2026, 11, 2)
+        view.sync()
+        view.day_edit._values = ["2026-11-02"]
+        modals.append((await press(view, view.day_edit)).response.modals[0])
+        return modals
+    for modal in run_async(scenario()):
+        payload = modal.to_components()
+        for top in payload:
+            inner = top.get("component", {})
+            if inner.get("type") == 4:                                            # a text input inside a Label
+                assert inner.get("label") is None, (modal.title, inner)             # null is fine, any text is refused
