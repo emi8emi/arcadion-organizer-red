@@ -10,6 +10,7 @@ dependencies = [
     # Windows has no system IANA time zone database, so zoneinfo
     # ("America/New_York") needs this package there.
     "tzdata>=2024.1",
+    "psycopg[binary]>=3.2",
 ]
 
 [dependency-groups]

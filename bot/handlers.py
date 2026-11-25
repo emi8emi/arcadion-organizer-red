@@ -12,20 +12,22 @@ from zoneinfo import available_timezones
 import discord
 
 from . import characters as ch
+from . import confirmations as cf
 from . import progscore
 from .fflogs import FFLogsError
 from . import heatmap
-from .config import ROOT
+from .config import ROOT, role_label
 from .db import DraftConflict, DuplicateRun, parse_iso
 from .grid import day_cutoff, parse_date, parse_hm, parse_local_datetime, run_slots
 from .services import (snapshot_note, cutoff_of, day_label, day_state, day_summary_lines, limits_text, locked_prog_lines, open_days,
-                       profile_text, signup_open, tick_lines, valid_timezone, validate_limits)
+                       profile_text, server_setting, signup_open, tick_lines, valid_timezone, validate_limits)
 from .snapshots import ensure_snapshot
 from .solver_io import DraftError, build_signups, fingerprint, import_draft, is_note
 from .posting import post_day_parties
 from .parties import apply_swap, plan_import
 from .views import AvailabilityView, RateListView
-from .votes import rateable_parties, slot_end, summary_counts
+from .votes import (FEEDBACK_CATEGORIES, feedback_counts, party_rating_counts, rateable_parties, slot_end,
+                    summary_counts)
 
 MAX_DRAFT_BYTES = 2_000_000
 
@@ -46,8 +48,7 @@ def is_organizer(ctx, user):
     if perms is not None and (getattr(perms, "manage_guild", False) or getattr(perms, "administrator", False)):
         return True
     guild_id = getattr(getattr(user, "guild", None), "id", None)
-    role_id = (ctx.db.guild_setting(guild_id, "organizer_role_id", ctx.cfg.get("organizer_role_id"))
-               if guild_id else ctx.cfg.get("organizer_role_id"))
+    role_id = server_setting(ctx, guild_id, "organizer_role_id") if guild_id else None
     return bool(role_id) and any(getattr(r, "id", None) == int(role_id) for r in getattr(user, "roles", []))
 
 
@@ -167,7 +168,7 @@ async def run_create(ctx, interaction, name, content, start_date, end_date,
              f"Each day's signups close at {cutoff_hm.strftime('%H:%M')} ({tz}) {when}: the first is "
              f"{discord.utils.format_dt(ordered[0], 'F')}, the last {discord.utils.format_dt(ordered[-1], 'F')}. "
              "It is a draft; use /run open to start signups."]
-    if not ctx.db.guild_setting(interaction.guild_id, "reminder_channel_id", ctx.cfg.get("reminder_channel_id")):
+    if not server_setting(ctx, interaction.guild_id, "reminder_channel_id"):
         lines.append("⚠ No reminder channel is set (use /settings set), "
                      "so the bot will not remind organizers to run /draft export after each cutoff.")
     await say(interaction, "\n".join(lines))
@@ -350,7 +351,7 @@ async def myschedule(ctx, interaction):
         for p in mine:
             when = discord.utils.format_dt(parse_iso(p["start_utc"]), "F")
             char = ctx.db.chosen_character(run["id"], p["slot_key"][:10], uid)
-            lines.append(f"• {when} as {p['role']}" + (f" ({ch.label(char)})" if char else ""))
+            lines.append(f"• {when} as {role_label(p['role'])}" + (f" ({ch.label(char)})" if char else ""))
     elif ctx.db.parties(run["id"]):
         lines.append("A draft is with the organizers; your parties show up here once they are confirmed.")
     await say(interaction, "\n".join(lines)[:1990])
@@ -477,6 +478,8 @@ async def draft_import(ctx, interaction, draft_file, name=None, day=None):
         return await say(interaction, f"Draft refused: {e}")
     except DraftConflict:
         return await say(interaction, "That day already has confirmed parties, so a new draft cannot replace them.")
+    if day_key:
+        cf.after_import(ctx.db, run["id"], day_key)         # keep confirmations of people still in the same slot
     lines = [f"Draft stored for **{run['name']}**{', ' + day_label(day_key) if day_key else ''} "
              f"(status: draft, nothing is posted to players): "
              f"{s['parties']} parties in {s['slots']} slots, {s['seated']} players seated, "
@@ -486,6 +489,59 @@ async def draft_import(ctx, interaction, draft_file, name=None, day=None):
     if len(s["slot_notes"]) > 5:
         lines.append(f"… and {len(s['slot_notes']) - 5} more unfilled slots.")
     await say(interaction, "\n".join(lines)[:1990])
+
+
+async def draft_confirm(ctx, interaction, name=None, day=None):
+    """Ask the members of a day's draft parties to confirm: one message per slot in the parties channel."""
+    if not await require_organizer(ctx, interaction):
+        return
+    run = await find_run(ctx, interaction, name)
+    if run is None:
+        return
+    if day:
+        row = await find_day(ctx, interaction, run, day)
+        if row is None:
+            return
+        day_key = row["day"]
+    else:
+        waiting = ctx.db.days_with_draft(run["id"])
+        if not waiting:
+            return await say(interaction, f"**{run['name']}** has no draft to confirm. Import one with /draft import.")
+        day_key = waiting[0]
+    drafts, approved = ctx.db.day_party_counts(run["id"], day_key)
+    if drafts == 0:
+        return await say(interaction, f"{day_label(day_key)} has no draft parties" +
+                         (" (it is already approved: players are asked in the slot threads)." if approved else
+                          ". Import one with /draft import."))
+    channel_id = server_setting(ctx, interaction.guild_id, "parties_channel_id")
+    channel = await ctx.get_channel(int(channel_id)) if channel_id and ctx.get_channel else None
+    if channel is None:
+        return await say(interaction, "I need the parties channel to ask people (use /settings set).")
+    await interaction.response.defer(ephemeral=True)
+    asked, pinged, errors = await cf.post_draft_prompts(ctx, run, day_key, channel)
+    lines = [f"Asked for confirmation for **{run['name']}**, {day_label(day_key)}: {asked} slot(s), "
+             f"{pinged} player(s) pinged. Follow it with /party dashboard."]
+    if errors:
+        lines.append("Some posts failed (run it again to retry):\n" + "\n".join(f"• {e}" for e in errors[:5]))
+    await say(interaction, "\n".join(lines)[:1990])
+
+
+async def party_dashboard(ctx, interaction, name=None, day=None):
+    """Organizers: the status dashboard (parties and threads that need attention)."""
+    from .dashboard import open_dashboard
+    if not await require_organizer(ctx, interaction):
+        return
+    run = await find_run(ctx, interaction, name)
+    if run is None:
+        return
+    day_key = None
+    if day:
+        row = await find_day(ctx, interaction, run, day)
+        if row is None:
+            return
+        day_key = row["day"]
+    if not await open_dashboard(ctx, interaction, run, day_key):
+        await say(interaction, f"**{run['name']}** has no parties yet. Import a draft with /draft import.")
 
 
 async def draft_approve(ctx, interaction, name=None, day=None):
@@ -506,7 +562,7 @@ async def draft_approve(ctx, interaction, name=None, day=None):
             return await say(interaction, f"**{run['name']}** has no draft to approve. Import one with /draft import.")
         day_key = waiting[0]
     drafts, approved = ctx.db.day_party_counts(run["id"], day_key)
-    channel_id = ctx.db.guild_setting(interaction.guild_id, "parties_channel_id", ctx.cfg.get("parties_channel_id"))
+    channel_id = server_setting(ctx, interaction.guild_id, "parties_channel_id")
     missing = [s for s, ps in ctx.db.approved_slots(run["id"], day_key) if any(not p["message_id"] for p, _ in ps)]
     if drafts == 0 and approved == 0:
         return await say(interaction, f"{day_label(day_key)} has no draft to approve. Import one with /draft import.")
@@ -587,7 +643,7 @@ async def votes_summary(ctx, interaction):
 # ---------------------------------------------------------------- /settings (per server)
 
 SETTING_LABELS = {"organizer_role_id": "Organizer role", "reminder_channel_id": "Reminder channel",
-                  "parties_channel_id": "Parties channel"}
+                  "parties_channel_id": "Parties channel", "user_panel_channel_id": "User panel channel"}
 
 
 def _setting_mention(key, value):
@@ -597,7 +653,7 @@ def _setting_mention(key, value):
 def settings_lines(ctx, guild_id):
     lines = []
     for key, label in SETTING_LABELS.items():
-        own, default = ctx.db.guild_setting(guild_id, key), ctx.cfg.get(key)
+        own, default = ctx.db.guild_setting(guild_id, key), server_setting(ctx, guild_id, key)
         if own:
             lines.append(f"**{label}:** {_setting_mention(key, own)}")
         elif default:
@@ -621,18 +677,24 @@ async def settings_show(ctx, interaction):
     await say(interaction, "\n".join(["**Server settings**", *settings_lines(ctx, interaction.guild_id)]))
 
 
-async def settings_set(ctx, interaction, organizer_role=None, reminder_channel=None, parties_channel=None):
+async def settings_set(ctx, interaction, organizer_role=None, reminder_channel=None, parties_channel=None,
+                       user_panel_channel=None):
     if not await require_manage_server(interaction):
         return
     given = {"organizer_role_id": organizer_role, "reminder_channel_id": reminder_channel,
-             "parties_channel_id": parties_channel}
+             "parties_channel_id": parties_channel, "user_panel_channel_id": user_panel_channel}
     given = {k: v for k, v in given.items() if v is not None}
     if not given:
         return await say(interaction, "Pick at least one option to set.\n"
                          + "\n".join(settings_lines(ctx, interaction.guild_id)))
+    from . import panel                                         # panel imports handlers
     warnings = []
     me = interaction.guild.me
     for key, obj in given.items():
+        if key == "user_panel_channel_id":
+            await interaction.response.defer(ephemeral=True)     # posting and pinning can take a moment
+            warnings.extend(await panel.install_panel(ctx, interaction.guild_id, obj))
+            continue
         ctx.db.set_guild_setting(interaction.guild_id, key, obj.id)
         if key != "organizer_role_id" and me is not None:
             perms = obj.permissions_for(me)
@@ -650,8 +712,77 @@ async def settings_clear(ctx, interaction, setting):
         return
     if setting not in SETTING_LABELS:
         return await say(interaction, "That is not a setting.")
+    if setting == "user_panel_channel_id":
+        from . import panel
+        await panel.remove_panel(ctx, interaction.guild_id)
     ctx.db.set_guild_setting(interaction.guild_id, setting, None)
     await say(interaction, "\n".join([f"Cleared **{SETTING_LABELS[setting]}**.", *settings_lines(ctx, interaction.guild_id)]))
+
+
+# ---------------------------------------------------------------- /feedback (organizers)
+
+def _name(ctx, pid):
+    player = ctx.db.get_player(pid)
+    return player["display_name"] if player else str(pid)
+
+
+async def feedback_summary(ctx, interaction):
+    """Organizers: per player, how the parties they were in were rated and who reported what. Never names a reporter."""
+    if not await require_organizer(ctx, interaction):
+        return
+    now, floor = ctx.now(), ctx.cfg["vote_floor"]
+    ratings = party_rating_counts(ctx.db, ctx.cfg, now)
+    reports, general = feedback_counts(ctx.db, ctx.cfg, now)
+    lines, hidden = [], 0
+    for pid in sorted(set(ratings) | set(reports), key=lambda p: _name(ctx, p).lower()):
+        parts = []
+        likes, dislikes = ratings.get(pid, (0, 0))
+        if likes + dislikes >= floor:
+            parts.append(f"parties 👍 {likes} / 👎 {dislikes}")
+        elif likes + dislikes:
+            hidden += 1
+        cats = reports.get(pid, {})
+        if cats:
+            parts.append("reports: " + ", ".join(f"{FEEDBACK_CATEGORIES[c][0].lower()} ×{n}" for c, n in
+                                                 sorted(cats.items(), key=lambda kv: -kv[1])))
+        if parts:
+            lines.append(f"**{_name(ctx, pid)}**: " + " · ".join(parts))
+    days = ctx.cfg["vote_expiry_days"]
+    head = (f"Party ratings and feedback from the last {days} days. Ratings of players in fewer than {floor} rated "
+            "parties are hidden. ×N is the number of different players who reported it; names of reporters are never shown. "
+            "Use /feedback player to read the notes.")
+    if general:
+        head += f"\n{general} report(s) named nobody: /feedback player without a player lists them."
+    if hidden:
+        lines.append(f"({hidden} more with fewer than {floor} ratings not shown)")
+    if not lines:
+        return await say(interaction, head + "\nNothing to show yet.")
+    first, *rest = _chunks([head, *lines])
+    await say(interaction, first)
+    for msg in rest:
+        await interaction.followup.send(msg, ephemeral=True)
+
+
+async def feedback_player(ctx, interaction, player=None):
+    """Organizers: the notes people sent about one player, or (no player) the ones that named nobody. Anonymous."""
+    if not await require_organizer(ctx, interaction):
+        return
+    now = ctx.now()
+    since = now - timedelta(days=ctx.cfg["vote_expiry_days"])
+    target = None if player is None else str(player.id)
+    rows = [r for r in ctx.db.feedback_rows(now, since) if r["target_id"] == target][::-1]
+    who = "feedback that named nobody" if target is None else f"feedback about {_name(ctx, target)}"
+    if not rows:
+        return await say(interaction, f"No {who} in the last {ctx.cfg['vote_expiry_days']} days.")
+    lines = [f"**{who.capitalize()}**, newest first (reporters are not shown):"]
+    for r in rows[:30]:
+        note = r["note"] or "no details"
+        lines.append(f"• {day_label(r['slot_key'][:10])} party {r['party_index'] + 1} · "
+                     f"{FEEDBACK_CATEGORIES[r['category']][0]}: {note}")
+    first, *rest = _chunks(lines)
+    await say(interaction, first)
+    for msg in rest:
+        await interaction.followup.send(msg, ephemeral=True)
 
 
 # ---------------------------------------------------------------- /debug (testing only)
@@ -861,12 +992,12 @@ async def party_import(ctx, interaction, party_file):
             except ValueError:
                 lines.append(f"⚠ Could not swap <@{op['out']}>: the party changed meanwhile.")
                 continue
-            lines.append(f"✅ <@{op['out']}> → <@{op['in']}> as {op['role']}")
+            lines.append(f"✅ <@{op['out']}> → <@{op['in']}> as {role_label(op['role'])}")
             lines += ["⚠ " + p for p in problems]
         else:
             ctx.db.set_member_role(party_id, op["player"], op["role"], interaction.user.id, now,
                                    warnings=warnings or None, source="import")
-            lines.append(f"✅ <@{op['player']}> is now {op['role']}")
+            lines.append(f"✅ <@{op['player']}> is now {role_label(op['role'])}")
     from .parties import refresh_party_message
     await refresh_party_message(ctx, party_id)
     await say(interaction, "\n".join(lines)[:1990])

@@ -9,7 +9,7 @@ import logging
 
 import discord
 
-from .config import ROLES
+from .config import ROLES, parse_role, role_label
 from .db import parse_iso
 from .parties import (REASONS, apply_swap, character_text, comp_warnings, dumps, minutes_played, name_of, party_json,
                       post_party_rating_prompt, reason_label, refresh_party_message, swap_warnings)
@@ -216,7 +216,7 @@ class EditPartyView(discord.ui.View):
             self.out_id = None
         if self.in_id in members:
             self.in_id = None
-        self.out_select.options = [discord.SelectOption(label=f"{name_of(db, d)} · {m['role']}"[:100], value=d,
+        self.out_select.options = [discord.SelectOption(label=f"{name_of(db, d)} · {role_label(m['role'])}"[:100], value=d,
                                                         default=d == self.out_id) for d, m in members.items()]
         self.standby_select.options = [discord.SelectOption(label=name_of(db, d)[:100], value=d, default=d == self.in_id)
                                        for d in pool[:25]] or [discord.SelectOption(label="Nobody on standby", value="-")]
@@ -232,7 +232,7 @@ class EditPartyView(discord.ui.View):
         lines = [f"**Edit party {party['party_index'] + 1}** · {party['slot_key']}"
                  + (" (already ended; edits still count)" if party["ended_utc"] else "")]
         chars = db.party_member_characters(self.party_id)
-        lines += [f"• <@{m['discord_id']}> {m['role']} · {character_text(chars.get(m['discord_id']))}"
+        lines += [f"• <@{m['discord_id']}> {role_label(m['role'])} · {character_text(chars.get(m['discord_id']))}"
                   for m in db.party_members(self.party_id)]
         lines.append(f"Swap out: {f'<@{self.out_id}>' if self.out_id else 'pick someone'} → "
                      f"in: {f'<@{self.in_id}>' if self.in_id else 'pick from standby or anyone'}")
@@ -330,8 +330,8 @@ class SwapModal(discord.ui.Modal):
     def __init__(self, view):
         super().__init__(title="Swap players")
         self.owner = view
-        self.role = discord.ui.TextInput(label="Role (blank = same as swapped-out)", required=False, max_length=6,
-                                         placeholder="tank, healer or dps")
+        self.role = discord.ui.TextInput(label="Role (blank = same as swapped-out)", required=False, max_length=20,
+                                         placeholder="main_tank, off_tank, regen, shield, melee, ranged or caster")
         self.text = discord.ui.TextInput(label="Reason (the swapped player can read this)", required=False,
                                          style=discord.TextStyle.paragraph, max_length=300,
                                          placeholder="Required for 'Other'. Be kind: they will see it.")
@@ -344,9 +344,10 @@ class SwapModal(discord.ui.Modal):
         members = {m["discord_id"]: m["role"] for m in ctx.db.party_members(v.party_id)}
         if v.out_id not in members or v.in_id in members:
             return await v.redraw(interaction, "⚠ The party changed meanwhile. Pick again.")
-        role = (self.role.value or "").strip().lower() or members[v.out_id]
+        role = parse_role(self.role.value) if (self.role.value or "").strip() else members[v.out_id]
         if role not in ROLES:
-            return await v.redraw(interaction, "⚠ The role must be tank, healer or dps. Nothing was changed.")
+            return await v.redraw(interaction, "⚠ The role must be main_tank, off_tank, regen, shield, melee, ranged or caster. "
+                                               "Nothing was changed.")
         text = (self.text.value or "").strip()
         if v.reason_code == "other" and not text:
             return await v.redraw(interaction, "⚠ 'Other' needs a written reason. Nothing was changed.")

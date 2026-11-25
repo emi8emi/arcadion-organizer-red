@@ -2,11 +2,15 @@
 import discord
 
 from . import characters as ch
-from .config import ROLES
+from .config import ROLES, role_label
 from .db import parse_iso, split_roles
-from .votes import cast_vote, current_rating, time_reason
+from .votes import FEEDBACK_CATEGORIES, MAX_NOTE, cast_party_rating, check_rater, submit_feedback, time_reason
 from .services import (checkpoint_label, clip_message, day_accepts_signups, day_label, day_state, cutoff_of,
                        profile_text, signup_open, snapshot_note, tick_lines, validate_limits)
+
+
+NO_ROLES_WARNING = ("⚠ **No roles selected yet.** Press **Roles** and pick every role you can play. "
+                    "Until you do, you will not be placed in any party.")
 
 
 class AvailabilityView(discord.ui.View):
@@ -20,15 +24,26 @@ class AvailabilityView(discord.ui.View):
         self.day = next((d["day"] for d in ctx.db.run_days(run["id"])
                          if day_accepts_signups(ctx, run, d)), self.days[0])     # first day still open
 
-        # Discord allows 5 rows, and a select takes a whole row, so roles are toggle buttons that share row 0
-        # with Limits and Done. Rows 1-4: prog, day, the character for that day, the day's slots.
-        self.role_buttons = [RoleButton(r) for r in ROLES]
-        self.prog_select = ProgSelect()
-        self.day_select = DaySelect()
-        self.character_select = CharacterSelect()
-        self.slot_select = SlotSelect()
-        for item in (*self.role_buttons, LimitsButton(), DoneButton(), self.prog_select, self.day_select,
-                     self.character_select, self.slot_select):
+        # Dropdowns occupy rows 0 to 3
+        self.prog_select = ProgSelect()          # row=0
+        self.day_select = DaySelect()            # row=1
+        self.character_select = CharacterSelect() # row=2
+        self.slot_select = SlotSelect()          # row=3
+        
+        # Action buttons grouped together on row 4 (the bottom)
+        self.roles_button = RolesButton()        # row=4
+        self.limits_button = LimitsButton()      # row=4
+        self.done_button = DoneButton()          # row=4
+
+        for item in (
+            self.prog_select, 
+            self.day_select, 
+            self.character_select, 
+            self.slot_select,
+            self.roles_button, 
+            self.limits_button, 
+            self.done_button
+        ):
             self.add_item(item)
         self.sync()
 
@@ -46,8 +61,9 @@ class AvailabilityView(discord.ui.View):
         prog = player["prog_index"] if player else None
         ticked = set(db.ticked_keys(self.run_id, self.user_id))
 
-        for b in self.role_buttons:
-            b.style = discord.ButtonStyle.success if b.role in roles else discord.ButtonStyle.secondary
+        self.roles_button.label = f"Roles ({len(roles)})" if roles else "Roles ⚠ none"
+        self.roles_button.style = discord.ButtonStyle.success if roles else discord.ButtonStyle.danger
+        
         self.prog_select.options = [
             discord.SelectOption(label=checkpoint_label(self.checkpoints, c["idx"])[:100], value=str(c["idx"]),
                                  default=(c["idx"] == prog)) for c in self.checkpoints[:25]]
@@ -67,8 +83,8 @@ class AvailabilityView(discord.ui.View):
         self.slot_select.max_values = max(1, len(day_slots))
         day_open = day_accepts_signups(self.ctx, run, rows[self.day])
         self.slot_select.disabled = not day_open                  # a closed day keeps its ticks, read-only
-        self.slot_select.placeholder = (f"Slots you can play on {day_label(self.day)} ({tz_name})" if day_open
-                                        else f"{day_label(self.day)} is closed: its slots are locked")
+        self.slot_select.placeholder = (f"Slots: {day_label(self.day)} ({tz_name})" if day_open
+                                        else f"{day_label(self.day)} (locked)")
         self._sync_character(day_open)
 
     def _sync_character(self, day_open):
@@ -76,25 +92,25 @@ class AvailabilityView(discord.ui.View):
         mine = ch.list_characters(self.ctx.db, self.user_id)
         if not mine:
             self.character_select.options = [discord.SelectOption(
-                label="No verified character yet", value="-", description="Use /character add, then /character verify")]
+                label="No verified character", value="-", description="Use /character add")]
             self.character_select.disabled = True
-            self.character_select.placeholder = "Character (none verified yet)"
+            self.character_select.placeholder = "Character (none)"
             return
         picked = self.ctx.db.chosen_character(self.run_id, self.day, self.user_id)
         self.character_select.options = [
             discord.SelectOption(label=ch.label(c)[:100], value=str(c["id"]),
                                  default=bool(picked) and picked["id"] == c["id"]) for c in mine]
         self.character_select.disabled = not day_open               # a closed day keeps its frozen character
-        self.character_select.placeholder = (f"Which character do you play on {day_label(self.day)}?" if day_open
-                                             else f"{day_label(self.day)} is closed: its character is locked")
+        self.character_select.placeholder = (f"Character for {day_label(self.day)}" if day_open
+                                             else f"{day_label(self.day)} character (locked)")
 
     def _character_line(self):
         char = self.ctx.db.chosen_character(self.run_id, self.day, self.user_id)
         if char:
-            return f"Character on {day_label(self.day)}: **{ch.label(char)}**"
+            return f"Char ({day_label(self.day)}): **{ch.label(char)}**"
         if not ch.list_characters(self.ctx.db, self.user_id):
-            return "⚠ You have no verified character yet: use /character add. Organizers will see you without one."
-        return f"⚠ Pick which character you play on {day_label(self.day)} (the Character menu)."
+            return "Char: None verified (/character add)"
+        return f"Char: Not set for {day_label(self.day)}"
 
     def _day_description(self, run, day_row, n_ticked):
         """Plain text for the day dropdown (Discord timestamps do not render inside dropdowns)."""
@@ -102,7 +118,7 @@ class AvailabilityView(discord.ui.View):
         if state == "open":
             local = cutoff_of(day_row).astimezone(self._zone()).strftime("%a %H:%M %Z")
             return f"{n_ticked} ticked · closes {local}"[:100]
-        return f"{n_ticked} ticked · {'not open yet' if state == 'draft' else 'closed'}"
+        return f"{n_ticked} ticked · {state}"
 
     def _zone(self):
         from zoneinfo import ZoneInfo
@@ -120,24 +136,20 @@ class AvailabilityView(discord.ui.View):
         day_lines = []
         for r in rows:
             if day_accepts_signups(self.ctx, run, r):
-                day_lines.append(f"{day_label(r['day'])}: closes {discord.utils.format_dt(cutoff_of(r), 'R')}")
+                day_lines.append(f"{day_label(r['day'])}: {discord.utils.format_dt(cutoff_of(r), 'R')}")
             else:
                 day_lines.append(f"{day_label(r['day'])}: closed")
-        parts = [f"**{run['name']}**: each day closes the evening before. Editing **{day_label(self.day)}**, "
-                 f"signups close {discord.utils.format_dt(cutoff_of(picked), 'R')}.",
-                 f"Your prog right now: **{checkpoint_label(self.checkpoints, prog)}**. "
-                 "It changes often, so check it before each day closes.",
-                 profile_text(self.ctx, run, self.user_id),
-                 self._character_line(),
-                 "Pick roles and your prog, then a day and the slots you can play. It saves as you click.",
-                 "Cutoffs:", *day_lines,
-                 f"Slots ticked ({len(keys)}), in your local time:"]
-        parts += tick_lines(self.ctx, run, keys, limit=18) or ["• none yet"]
+        parts = [] if split_roles(player["roles"] if player else "") else [NO_ROLES_WARNING]
+        parts += [
+            f"**{run['name']}** | Editing **{day_label(self.day)}** (closes {discord.utils.format_dt(cutoff_of(picked), 'R')})",
+            f"Prog: **{checkpoint_label(self.checkpoints, prog)}** | {self._character_line()}",
+            f"Ticked: {len(keys)} slots | Cutoffs: " + " | ".join(day_lines)
+        ]
+        parts += tick_lines(self.ctx, run, keys, limit=18) or ["• none"]
         return clip_message("\n".join(parts), limit)
 
     async def refresh(self, interaction, extra=""):
         self.sync()
-        # the extra line is appended after clipping, so a long menu can never push it out of the message
         await interaction.response.edit_message(content=self.render(1990 - len(extra)) + extra, view=self)
 
     async def refresh_after_edit(self, interaction):
@@ -154,46 +166,22 @@ class AvailabilityView(discord.ui.View):
         return ok
 
     async def guard_day(self, interaction):
-        """Like guard, but also refuses the day being edited when that day alone has closed.
-
-        The menu stays open so the player can switch to a day that is still open.
-        """
+        """Like guard, but also refuses the day being edited when that day alone has closed."""
         if not await self.guard(interaction):
             return False
         ok, why = signup_open(self.ctx, self.run, self.day)
         if not ok:
-            await self.refresh(interaction, extra=f"\n⚠ {why} Nothing was changed.")
+            await self.refresh(interaction, extra=f"\n⚠ {why}")
         return ok
 
     async def interaction_check(self, interaction):
         return str(interaction.user.id) == self.user_id
 
 
-class RoleButton(discord.ui.Button):
-    """One toggle per role: green = you can play it. At least one role stays on."""
-
-    def __init__(self, role):
-        super().__init__(label="DPS" if role == "dps" else role.capitalize(), style=discord.ButtonStyle.secondary,
-                         row=0)
-        self.role = role
-
-    async def callback(self, interaction):
-        v = self.view
-        if not await v.guard(interaction):
-            return
-        player = v.ctx.db.get_player(v.user_id)
-        roles = set(split_roles(player["roles"]) if player else [])
-        roles = roles - {self.role} if self.role in roles else roles | {self.role}
-        if not roles:
-            return await v.refresh(interaction, extra="\n⚠ Keep at least one role on.")
-        v.ctx.db.upsert_player(v.user_id, v.display_name, roles=sorted(roles), now=v.ctx.now())
-        await v.refresh_after_edit(interaction)
-
-
 class ProgSelect(discord.ui.Select):
     def __init__(self):
-        super().__init__(placeholder="Your prog checkpoint", min_values=1, max_values=1,
-                         options=[discord.SelectOption(label="loading", value="0")], row=1)
+        super().__init__(placeholder="Prog checkpoint", min_values=1, max_values=1,
+                         options=[discord.SelectOption(label="loading", value="0")], row=0)
 
     async def callback(self, interaction):
         v = self.view
@@ -205,7 +193,7 @@ class ProgSelect(discord.ui.Select):
 class DaySelect(discord.ui.Select):
     def __init__(self):
         super().__init__(placeholder="Day to edit", min_values=1, max_values=1,
-                         options=[discord.SelectOption(label="loading", value="0")], row=2)
+                         options=[discord.SelectOption(label="loading", value="0")], row=1)
 
     async def callback(self, interaction):
         v = self.view
@@ -218,14 +206,14 @@ class CharacterSelect(discord.ui.Select):
 
     def __init__(self):
         super().__init__(placeholder="Character", min_values=1, max_values=1,
-                         options=[discord.SelectOption(label="loading", value="0")], row=3)
+                         options=[discord.SelectOption(label="loading", value="0")], row=2)
 
     async def callback(self, interaction):
         v = self.view
         if await v.guard_day(interaction):
-            char = ch.get_character(v.ctx.db, v.user_id, int(self.values[0]))     # must be one of their own
+            char = ch.get_character(v.ctx.db, v.user_id, int(self.values[0]))
             if char is None:
-                return await v.refresh(interaction, extra="\n⚠ That is not one of your verified characters.")
+                return await v.refresh(interaction, extra="\n⚠ Invalid character.")
             v.ctx.db.upsert_player(v.user_id, v.display_name, now=v.ctx.now())
             v.ctx.db.set_signup_character(v.run_id, [v.day], v.user_id, char["id"])
             await v.refresh(interaction)
@@ -234,7 +222,7 @@ class CharacterSelect(discord.ui.Select):
 class SlotSelect(discord.ui.Select):
     def __init__(self):
         super().__init__(placeholder="Slots", min_values=0, max_values=1,
-                         options=[discord.SelectOption(label="loading", value="0")], row=4)
+                         options=[discord.SelectOption(label="loading", value="0")], row=3)
 
     async def callback(self, interaction):
         v = self.view
@@ -244,29 +232,69 @@ class SlotSelect(discord.ui.Select):
             await v.refresh(interaction)
 
 
+class RolesButton(discord.ui.Button):
+    """Opens the roles modal."""
+    def __init__(self):
+        super().__init__(label="Roles", style=discord.ButtonStyle.secondary, row=4)
+
+    async def callback(self, interaction):
+        v = self.view
+        if await v.guard(interaction):
+            await interaction.response.send_modal(RolesModal(v))
+
+
 class LimitsButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="Limits", style=discord.ButtonStyle.secondary, row=0)
+        super().__init__(label="Limits", style=discord.ButtonStyle.secondary, row=4)
 
     async def callback(self, interaction):
         v = self.view
         if await v.guard(interaction):
             player = v.ctx.db.get_player(v.user_id)
-            if not player or player["prog_index"] is None:           # the lowest checkpoint is picked relative to it
-                return await v.refresh(interaction, extra="\n⚠ Pick your prog checkpoint first, then set your limits.")
+            if not player or player["prog_index"] is None:
+                return await v.refresh(interaction, extra="\n⚠ Pick prog first.")
             await interaction.response.send_modal(LimitsModal(v))
 
 
 class DoneButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="Done", style=discord.ButtonStyle.primary, row=0)
+        super().__init__(label="Done", style=discord.ButtonStyle.primary, row=4)
 
     async def callback(self, interaction):
         v = self.view
         v.stop()
-        done = "\n\nRun /availability again to change it."
+        player = v.ctx.db.get_player(v.user_id)
+        done = "\n\nSaved. Run /availability to edit."
+        if not split_roles(player["roles"] if player else ""):
+            done = "\n\n⚠ Saved, but you still have **no roles selected**, so you will not be placed in a party. " \
+                   "Run /availability and press Roles."
         await interaction.response.edit_message(content=v.render(1990 - len(done)) + done, view=None)
 
+
+class RolesModal(discord.ui.Modal):
+    """Every role the player can play (flex players pick several). At least one stays selected."""
+
+    def __init__(self, view):
+        super().__init__(title="Roles you can play")
+        self.owner = view
+        player = view.ctx.db.get_player(view.user_id)
+        have = set(split_roles(player["roles"]) if player else ROLES)
+        self.select = discord.ui.Select(
+            min_values=1, max_values=len(ROLES),
+            options=[discord.SelectOption(label=role_label(r), value=r, default=r in have) for r in ROLES])
+        self.add_item(discord.ui.Label(
+            text="Roles", component=self.select,
+            description="Please pick all the roles you're willing to play."))
+
+    async def on_submit(self, interaction):
+        v = self.owner
+        roles = {r for r in self.select.values if r in ROLES}
+        if not roles:
+            await interaction.response.send_message("Keep at least one role.", ephemeral=True)
+            return
+        if await v.guard(interaction):
+            v.ctx.db.upsert_player(v.user_id, v.display_name, roles=sorted(roles), now=v.ctx.now())
+            await v.refresh_after_edit(interaction)
 
 class LimitsModal(discord.ui.Modal):
     def __init__(self, view):
@@ -275,46 +303,99 @@ class LimitsModal(discord.ui.Modal):
         db = view.ctx.db
         lim = db.get_limits(view.run_id, view.user_id, view.ctx.cfg)
         prog = db.get_player(view.user_id)["prog_index"]
-        self.per_day = discord.ui.TextInput(label="Max parties per day", default=str(lim["max_per_day"]),
-                                            max_length=2)
-        self.per_run = discord.ui.TextInput(label="Max parties for the whole run", default=str(lim["max_per_run"]),
-                                            max_length=2)
-        # The lowest checkpoint the player accepts, from their own prog downwards. It is stored as the number of
-        # checkpoints below their prog (drop_checkpoints), which is what the solver export uses.
+
+        self.per_day = discord.ui.TextInput(
+            label="Max parties per day",
+            default=str(lim["max_per_day"]),
+            max_length=2
+        )
+
+        self.per_run = None
+        if view.ctx.cfg.get("enable_per_run_limit", False):
+            self.per_run = discord.ui.TextInput(
+                label="Max parties per run",
+                default=str(lim["max_per_run"]),
+                max_length=2
+            )
+
         reachable = [c for c in view.checkpoints if c["idx"] <= prog][-25:]
         current_min = max(prog - lim["drop_checkpoints"], reachable[0]["idx"])
+
         self.min_select = discord.ui.Select(
-            min_values=1, max_values=1,
-            options=[discord.SelectOption(
-                label=(checkpoint_label(view.checkpoints, c["idx"]) + (" (my prog: no lower)" if c["idx"] == prog else ""))[:100],
-                value=str(c["idx"]), default=c["idx"] == current_min) for c in reachable])
-        for item in (self.per_day, self.per_run,
-                     discord.ui.Label(text="Lowest checkpoint you accept", component=self.min_select,
-                                      description="Pick your own prog if you never want to play lower.")):
-            self.add_item(item)
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(
+                    label=(
+                        checkpoint_label(view.checkpoints, c["idx"])
+                        + (" (my prog: no lower)" if c["idx"] == prog else "")
+                    )[:100],
+                    value=str(c["idx"]),
+                    default=c["idx"] == current_min
+                )
+                for c in reachable
+            ]
+        )
+
+        self.add_item(self.per_day)
+
+        if self.per_run is not None:
+            self.add_item(self.per_run)
+
+        self.add_item(
+            discord.ui.Label(
+                text="Lowest checkpoint you accept",
+                component=self.min_select,
+                description="Pick your own prog if you never want to play lower."
+            )
+        )
 
     async def on_submit(self, interaction):
         v = self.owner
+
         try:
-            per_day, per_run = (int(x.value) for x in (self.per_day, self.per_run))
+            per_day = int(self.per_day.value)
+            per_run = int(self.per_run.value) if self.per_run is not None else 99
         except ValueError:
-            await interaction.response.send_message("Those need to be whole numbers.", ephemeral=True)
+            await interaction.response.send_message(
+                "Those need to be whole numbers.",
+                ephemeral=True
+            )
             return
+
         player = v.ctx.db.get_player(v.user_id)
         prog = player["prog_index"] if player else None
+
         if prog is None:
-            await interaction.response.send_message("Pick your prog checkpoint first, then set your limits.", ephemeral=True)
+            await interaction.response.send_message(
+                "Pick your prog checkpoint first, then set your limits.",
+                ephemeral=True
+            )
             return
-        drop = max(0, prog - int(self.min_select.values[0]))      # checkpoints below their prog they accept
+
+        drop = max(0, prog - int(self.min_select.values[0]))
+
         err = validate_limits(per_day, per_run, drop, len(v.checkpoints))
         if err:
             await interaction.response.send_message(err, ephemeral=True)
             return
+
         if await v.guard(interaction):
-            v.ctx.db.upsert_player(v.user_id, v.display_name, now=v.ctx.now())
-            v.ctx.db.set_limits(v.run_id, v.user_id, v.ctx.cfg, max_per_day=per_day, max_per_run=per_run,
-                                drop_checkpoints=drop)
+            v.ctx.db.upsert_player(
+                v.user_id,
+                v.display_name,
+                now=v.ctx.now()
+            )
+            v.ctx.db.set_limits(
+                v.run_id,
+                v.user_id,
+                v.ctx.cfg,
+                max_per_day=per_day,
+                max_per_run=per_run,
+                drop_checkpoints=drop
+            )
             await v.refresh_after_edit(interaction)
+
 
 
 # ---------------------------------------------------------------- rating (private, ephemeral only)
@@ -370,43 +451,35 @@ async def open_rating(ctx, interaction, party_id):
     await interaction.response.send_message(view.render(), view=view, ephemeral=True)
 
 
-RATING_EMOJI = {"like": "👍", "neutral": "😐", "dislike": "👎"}
-RATING_STYLE = {"like": discord.ButtonStyle.success, "neutral": discord.ButtonStyle.secondary,
-                "dislike": discord.ButtonStyle.danger}
-NEXT_RATING = {"neutral": "like", "like": "dislike", "dislike": "neutral"}   # one tap = next rating
+RATING_BUTTONS = {"like": ("Liked it", "👍", discord.ButtonStyle.success),
+                  "dislike": ("Didn't enjoy it", "👎", discord.ButtonStyle.danger)}
 
 
 class RateView(discord.ui.View):
-    """Ephemeral: one button per other member. Tap a name to cycle their rating 😐 -> 👍 -> 👎 -> 😐
-    (each tap is saved at once). Ratings are read from the database once, when the view opens."""
+    """Ephemeral: rate the party as a whole (👍 / 👎), or give feedback about a problem or a player."""
 
     def __init__(self, ctx, party_id, user_id):
         super().__init__(timeout=900)
         self.ctx, self.party_id, self.user_id = ctx, party_id, str(user_id)
         self.notice = ""
         self.title = party_title(ctx.db.party(party_id))
-        self.members = [m for m in ctx.db.party_members(party_id) if m["discord_id"] != self.user_id][:20]
-        now = ctx.now()
-        self.ratings = {m["discord_id"]: current_rating(ctx.db, self.user_id, m["discord_id"], now)
-                        for m in self.members}
-        self.buttons = []
-        for i, m in enumerate(self.members):
-            name = (ctx.db.get_player(m["discord_id"]) or {"display_name": "Player"})["display_name"]
-            button = MemberRateButton(m["discord_id"], f"{name} · {m['role']}"[:80], row=i // 5)
-            self.buttons.append(button)
-            self.add_item(button)
-        self.add_item(RateDoneButton())
+        self.rating = ctx.db.party_rating(party_id, self.user_id)
+        self.buttons = {r: PartyRatingButton(r) for r in RATING_BUTTONS}
+        for b in self.buttons.values():
+            self.add_item(b)
+        self.add_item(FeedbackButton())
         self.sync()
 
     def sync(self):
-        for b in self.buttons:
-            rating = self.ratings[b.target_id]
-            b.emoji, b.style = RATING_EMOJI[rating], RATING_STYLE[rating]
+        for rating, b in self.buttons.items():
+            b.style = RATING_BUTTONS[rating][2] if rating == self.rating else discord.ButtonStyle.secondary
 
     def render(self):
-        lines = [f"**Rate your party:** {self.title}",
-                 "Tap a player to change your rating: 😐 neutral → 👍 like → 👎 dislike → 😐. "
-                 "Saved at once. Only you can see this, and you can change it until the window closes."]
+        lines = [f"**How was your party overall?** {self.title}",
+                 "Tap 👍 or 👎 for the group as a whole. Use **Give feedback** to point out a problem or a player. "
+                 "Only organizers ever see feedback, and never your name."]
+        if self.rating:
+            lines.append(f"Your rating: {RATING_BUTTONS[self.rating][1]} (tap the other one to change it)")
         if self.notice:
             lines.append(self.notice)
         return "\n".join(lines)[:1990]
@@ -419,30 +492,73 @@ class RateView(discord.ui.View):
         await interaction.response.edit_message(content=self.render(), view=self)
 
 
-class MemberRateButton(discord.ui.Button):
-    def __init__(self, target_id, label, row):
-        super().__init__(label=label, style=discord.ButtonStyle.secondary, emoji=RATING_EMOJI["neutral"], row=row)
-        self.target_id = target_id
+class PartyRatingButton(discord.ui.Button):
+    def __init__(self, rating):
+        label, emoji, _ = RATING_BUTTONS[rating]
+        super().__init__(label=label, emoji=emoji, style=discord.ButtonStyle.secondary)
+        self.rating = rating
 
     async def callback(self, interaction):
         v = self.view
-        new = NEXT_RATING[v.ratings[self.target_id]]
-        ok, why = cast_vote(v.ctx, v.user_id, self.target_id, new, v.party_id)
+        ok, why = cast_party_rating(v.ctx, v.user_id, v.party_id, self.rating)
         if ok:
-            v.ratings[self.target_id], v.notice = new, ""
+            v.rating, v.notice = self.rating, ""
         else:
             v.notice = f"⚠ {why} Nothing was saved."
         await v.redraw(interaction)
 
 
-class RateDoneButton(discord.ui.Button):
+class FeedbackButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="Done", style=discord.ButtonStyle.primary, row=4)
+        super().__init__(label="Give feedback", style=discord.ButtonStyle.primary)
 
     async def callback(self, interaction):
-        self.view.stop()
-        await interaction.response.edit_message(content="✅ Saved. Press the button again any time before the window closes.",
-                                                view=None)
+        v = self.view
+        _, why = check_rater(v.ctx.db, v.ctx.cfg, v.ctx.now(), v.user_id, v.party_id)
+        if why:
+            v.notice = f"⚠ {why}"
+            return await v.redraw(interaction)
+        await interaction.response.send_modal(FeedbackModal(v.ctx, v.party_id, v.user_id))
+
+
+class FeedbackModal(discord.ui.Modal):
+    """Who it is about (optional), what happened, and details. Sent to organizers without the reporter's name."""
+
+    def __init__(self, ctx, party_id, user_id):
+        super().__init__(title="Feedback about your party")
+        self.ctx, self.party_id, self.user_id = ctx, party_id, str(user_id)
+        others = [m for m in ctx.db.party_members(party_id) if m["discord_id"] != self.user_id][:25]
+        every = ctx.db.party_feedback_by(party_id, user_id)
+        last = max(every, key=lambda r: r["id"])["category"] if every else None   # start from the latest one sent;
+        earlier = [r for r in every if r["category"] == last]                      # the same category replaces it
+        named = {r["target_id"] for r in earlier}
+        self.players = discord.ui.Select(
+            min_values=0, max_values=max(1, len(others)), required=False,
+            options=[discord.SelectOption(
+                label=((ctx.db.get_player(m["discord_id"]) or {"display_name": "Player"})["display_name"]
+                       + " · " + role_label(m["role"]))[:100],
+                value=m["discord_id"], default=m["discord_id"] in named) for m in others]
+            or [discord.SelectOption(label="Nobody else", value="none")])
+        self.category = discord.ui.Select(
+            min_values=1, max_values=1,
+            options=[discord.SelectOption(label=label, value=key, default=bool(earlier) and earlier[0]["category"] == key)
+                     for key, (label, _) in FEEDBACK_CATEGORIES.items()])
+        self.note = discord.ui.TextInput(style=discord.TextStyle.paragraph, required=False, max_length=MAX_NOTE,
+                                         default=(earlier[0]["note"] if earlier else None) or None,
+                                         placeholder="What happened? Organizers read this.")
+        self.add_item(discord.ui.Label(text="Who is it about?", component=self.players,
+                                       description="Leave empty if it is about the party in general."))
+        self.add_item(discord.ui.Label(text="What happened?", component=self.category))
+        self.add_item(discord.ui.Label(text="Details (optional)", component=self.note))
+
+    async def on_submit(self, interaction):
+        targets = [v for v in self.players.values if v != "none"]
+        ok, why = submit_feedback(self.ctx, self.user_id, self.party_id, targets, self.category.values[0],
+                                  self.note.value)
+        await interaction.response.send_message(
+            "Thanks, the organizers will see this (without your name). Sending the same category again replaces it; "
+            "another category is added next to it."
+            if ok else f"⚠ {why} Nothing was saved.", ephemeral=True)
 
 
 class RateListView(discord.ui.View):

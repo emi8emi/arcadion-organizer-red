@@ -11,7 +11,7 @@ import discord
 
 from . import heatmap
 from .db import parse_iso
-from .services import day_label
+from .services import day_label, server_setting
 
 log = logging.getLogger("raidbot")
 
@@ -35,14 +35,13 @@ def due_reminders(db, now, cfg):
         ready, incomplete, fillable = heatmap.day_summary(db, run, cfg, day["day"])
         if last is not None and (ready == 0 or now - last < interval):
             continue
-        due.append({"run_id": day["run_id"], "run_name": day["run_name"], "day": day["day"],
+        due.append({"run_id": day["run_id"], "guild_id": run["guild_id"], "run_name": day["run_name"], "day": day["day"],
                     "ready": ready, "incomplete": incomplete, "fillable": fillable})
     return due
 
 
-def format_reminder(item, cfg):
-    """The message text for one due reminder."""
-    role_id = cfg.get("organizer_role_id")
+def format_reminder(item, role_id):
+    """The message text for one due reminder; `role_id` is that server's organizer role, or None."""
     ping = f"<@&{role_id}> " if role_id else ""
     where = f"**{item['run_name']}**, {day_label(item['day'])}"
     if item["ready"] == 0:
@@ -54,26 +53,34 @@ def format_reminder(item, cfg):
 
 
 async def send_due_reminders(ctx, get_channel):
-    """Send every due reminder to the configured channel. `get_channel` is an async callable returning it.
+    """Send every due reminder to its own server's reminder channel (/settings; the home server also has the
+    bot-wide default). `get_channel` is an async callable returning a channel.
 
-    A reminder is marked as sent only after Discord accepted it, so a failure is retried next minute.
+    A server without a reminder channel is skipped and its reminders stay due, so setting the channel later
+    sends them. A reminder is marked as sent only after Discord accepted it, so a failure is retried next minute.
     Returns the number sent.
     """
-    channel_id = ctx.cfg.get("reminder_channel_id")
-    if not channel_id:
-        return 0
     items = due_reminders(ctx.db, ctx.now(), ctx.cfg)
-    if not items:
-        return 0
-    channel = await get_channel(int(channel_id))
-    if channel is None:
-        log.warning("reminder channel %s not found; check reminder_channel_id", channel_id)
-        return 0
-    sent = 0
+    sent, channels = 0, {}
     for item in items:
+        guild_id = item["guild_id"]
+        channel_id = server_setting(ctx, guild_id, "reminder_channel_id")
+        if not channel_id:
+            continue
+        if guild_id not in channels:
+            try:
+                channels[guild_id] = await get_channel(int(channel_id))
+            except Exception:
+                channels[guild_id] = None
+            if channels[guild_id] is None:
+                log.warning("reminder channel %s of server %s not found; check /settings", channel_id, guild_id)
+        channel = channels[guild_id]
+        if channel is None:
+            continue
         mentions = discord.AllowedMentions(roles=True, users=False, everyone=False)
+        text = format_reminder(item, server_setting(ctx, guild_id, "organizer_role_id"))
         try:
-            await channel.send(format_reminder(item, ctx.cfg), allowed_mentions=mentions)
+            await channel.send(text, allowed_mentions=mentions)
         except Exception:                                   # missing permission, rate limit, outage
             log.exception("could not send the export reminder for %s %s", item["run_name"], item["day"])
             continue

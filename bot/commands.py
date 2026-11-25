@@ -119,6 +119,12 @@ class DraftGroup(app_commands.Group):
     async def approve(self, interaction: discord.Interaction, name: Optional[str] = None, day: Optional[str] = None):
         await handlers.draft_approve(self.ctx, interaction, name, day)
 
+    @app_commands.command(name="confirm", description="Ask the draft's players to confirm (one message per slot, pings them)")
+    @app_commands.describe(name="Run name (default: the newest run)",
+                           day="The day, like 2026-11-02 (default: the earliest day with a draft)")
+    async def confirm(self, interaction: discord.Interaction, name: Optional[str] = None, day: Optional[str] = None):
+        await handlers.draft_confirm(self.ctx, interaction, name, day)
+
 
 class PartyGroup(app_commands.Group):
     def __init__(self, ctx):
@@ -130,15 +136,35 @@ class PartyGroup(app_commands.Group):
     async def import_(self, interaction: discord.Interaction, party_file: discord.Attachment):
         await handlers.party_import(self.ctx, interaction, party_file)
 
+    @app_commands.command(name="dashboard", description="Which parties and threads need attention (confirmations, threads)")
+    @app_commands.describe(name="Run name (default: the newest run)", day="The day, like 2026-11-02 (default: first day needing attention)")
+    async def dashboard(self, interaction: discord.Interaction, name: Optional[str] = None, day: Optional[str] = None):
+        await handlers.party_dashboard(self.ctx, interaction, name, day)
+
 
 class VotesGroup(app_commands.Group):
     def __init__(self, ctx):
         super().__init__(name="votes", description="Organizers: ratings between players", guild_only=True)
         self.ctx = ctx
 
-    @app_commands.command(name="summary", description="Likes and dislikes received per player (no voter names)")
+    @app_commands.command(name="summary", description="Older per-player likes and dislikes received (no voter names)")
     async def summary(self, interaction: discord.Interaction):
         await handlers.votes_summary(self.ctx, interaction)
+
+
+class FeedbackGroup(app_commands.Group):
+    def __init__(self, ctx):
+        super().__init__(name="feedback", description="Organizers: party ratings and player feedback", guild_only=True)
+        self.ctx = ctx
+
+    @app_commands.command(name="summary", description="Party ratings and reports per player (no reporter names)")
+    async def summary(self, interaction: discord.Interaction):
+        await handlers.feedback_summary(self.ctx, interaction)
+
+    @app_commands.command(name="player", description="Read the notes about one player (leave empty for notes that named nobody)")
+    @app_commands.describe(player="The player the feedback is about")
+    async def player(self, interaction: discord.Interaction, player: Optional[discord.Member] = None):
+        await handlers.feedback_player(self.ctx, interaction, player)
 
 
 class HelperGroup(app_commands.Group):
@@ -212,16 +238,20 @@ class SettingsGroup(app_commands.Group):
     @app_commands.command(name="set", description="Set the organizer role and/or channels (leave out what you keep)")
     @app_commands.describe(organizer_role="Role that counts as organizer (Manage Server always counts)",
                            reminder_channel="Channel where I remind organizers to run /draft export",
-                           parties_channel="Channel where I create the party threads after /draft approve")
+                           parties_channel="Channel where I create the party threads after /draft approve",
+                           user_panel_channel="Channel where I post and pin the player panel (availability, characters)")
     async def set(self, interaction: discord.Interaction, organizer_role: Optional[discord.Role] = None,
                   reminder_channel: Optional[discord.TextChannel] = None,
-                  parties_channel: Optional[discord.TextChannel] = None):
-        await handlers.settings_set(self.ctx, interaction, organizer_role, reminder_channel, parties_channel)
+                  parties_channel: Optional[discord.TextChannel] = None,
+                  user_panel_channel: Optional[discord.TextChannel] = None):
+        await handlers.settings_set(self.ctx, interaction, organizer_role, reminder_channel, parties_channel,
+                                    user_panel_channel)
 
     @app_commands.command(name="clear", description="Remove one setting, so the bot's default applies again")
     @app_commands.choices(setting=[app_commands.Choice(name="Organizer role", value="organizer_role_id"),
                                    app_commands.Choice(name="Reminder channel", value="reminder_channel_id"),
-                                   app_commands.Choice(name="Parties channel", value="parties_channel_id")])
+                                   app_commands.Choice(name="Parties channel", value="parties_channel_id"),
+                                   app_commands.Choice(name="User panel channel", value="user_panel_channel_id")])
     async def clear(self, interaction: discord.Interaction, setting: app_commands.Choice[str]):
         await handlers.settings_clear(self.ctx, interaction, setting.value)
 
@@ -263,6 +293,7 @@ def register(tree, ctx):
     tree.add_command(HelperGroup(ctx))
     tree.add_command(PartyGroup(ctx))
     tree.add_command(VotesGroup(ctx))
+    tree.add_command(FeedbackGroup(ctx))
     tree.add_command(SettingsGroup(ctx))
     tree.add_command(CharacterGroup(ctx))
     if os.getenv("DEBUG_COMMANDS") == "1":  # testing only, off by default

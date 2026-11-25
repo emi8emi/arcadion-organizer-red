@@ -1,0 +1,7 @@
+.env
+data/
+__pycache__/
+.venv/
+node_modules/
+web/build/
+.svelte-kit/

@@ -1,6 +1,5 @@
 """Ratings: eligibility, latest-wins, the solver export, privacy of the summary, the private rating UI."""
 import json
-import sqlite3
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -9,19 +8,18 @@ from pathlib import Path
 import pytest
 
 from bot import handlers
-from bot.db import DB
 from bot.posting import post_rating_prompts
 from bot.snapshots import take_due_snapshots
 from bot.solver_io import build_signups, fingerprint, import_draft
-from bot.views import RateListView, RatePartyButton, RatePromptView, RateView, open_rating
-from bot.votes import cast_vote, check_vote, current_rating, rateable_parties, summary_counts, votes_for_export
-from conftest import S2, add_party_players, at, confirm, draft_for_day, organizer, player, run_async
+from bot.views import FeedbackModal, RateListView, RatePartyButton, RatePromptView, RateView, open_rating
+from bot.votes import (cast_party_rating, check_rater, feedback_counts, inferred_scores, party_rating_counts,
+                       rateable_parties, submit_feedback, summary_counts, votes_for_export)
+from conftest import NOW, S2, add_party_players, at, confirm, draft_for_day, organizer, player, run_async
 from test_approve import FakeParties, attach
 
 UTC = timezone.utc
 D2, D3 = "2026-11-02", "2026-11-03"
 S2B = "2026-11-02T20:00"
-OLD = Path(__file__).resolve().parent / "fixtures" / "schema_before_votes.sql"
 SOLVER_DIR = Path(__file__).resolve().parent.parent.parent / "raid-solver"
 # S2 = Mon 17:00 EST = 22:00Z, 90 minutes: it ends 23:30Z. S2B ends 02:30Z the next day.
 ENDED = "2026-11-02T23:31"
@@ -32,7 +30,7 @@ def two_parties(ctx, make_run):
     run = make_run(per_day=True)
     a = add_party_players(ctx, run, [S2], first_id=1)
     b = add_party_players(ctx, run, [S2B], first_id=9)
-    roles = ["tank"] * 2 + ["healer"] * 2 + ["dps"] * 4
+    roles = ["main_tank", "off_tank", "regen", "shield", "melee", "melee", "ranged", "caster"]
     parties = [{"slot_key": slot, "party_index": 0, "target_idx": 0,
                 "members": [{"discord_id": i, "role": r, "helper": False, "placed_down": False, "distance": 0}
                             for i, r in zip(ids, roles)]} for slot, ids in ((S2, a), (S2B, b))]
@@ -44,16 +42,14 @@ def two_parties(ctx, make_run):
 
 # ---------------------------------------------------------------- eligibility
 
-def test_a_vote_needs_the_same_confirmed_party_of_a_slot_that_has_ended(ctx, make_run, clock):
+def test_a_rating_needs_the_same_confirmed_party_of_a_slot_that_has_ended(ctx, make_run, clock):
     run, pa, pb = two_parties(ctx, make_run)
     at(clock, ENDED)
-    ok = lambda voter, target, party: check_vote(ctx.db, ctx.cfg, clock["now"], voter, target, party)    # noqa: E731
-    assert ok(1, 2, pa) == (True, "")
-    assert ok(1, 1, pa)[1] == "You cannot rate yourself."
-    assert "not in your party" in ok(1, 9, pa)[1]                 # a player from the other party
-    assert "not in that party" in ok(9, 2, pa)[1]                 # voter was not in the party at all
-    assert "not ended" in ok(9, 10, pb)[1]                        # S2B is still running
-    assert "not confirmed" in ok(1, 2, 9999)[1]
+    ok = lambda voter, party: check_rater(ctx.db, ctx.cfg, clock["now"], voter, party)[1]    # noqa: E731
+    assert ok(1, pa) == ""
+    assert "not in that party" in ok(9, pa)                       # voter was not in the party at all
+    assert "not ended" in ok(9, pb)                               # S2B is still running
+    assert "not confirmed" in ok(1, 9999)
 
 
 def test_a_draft_party_is_not_rateable(ctx, make_run, clock):
@@ -61,13 +57,13 @@ def test_a_draft_party_is_not_rateable(ctx, make_run, clock):
     with ctx.db.conn:
         ctx.db.conn.execute("UPDATE parties SET status = 'draft'")
     at(clock, ENDED)
-    assert "not confirmed" in check_vote(ctx.db, ctx.cfg, clock["now"], 1, 2, pa)[1]
+    assert "not confirmed" in check_rater(ctx.db, ctx.cfg, clock["now"], 1, pa)[1]
 
 
 def test_the_window_opens_at_the_end_and_closes_after_vote_window_hours(ctx, make_run, clock):
     run, pa, _ = two_parties(ctx, make_run)
     end = datetime(2026, 11, 2, 23, 30, tzinfo=UTC)
-    check = lambda t: check_vote(ctx.db, ctx.cfg, t, 1, 2, pa)[0]            # noqa: E731
+    check = lambda t: check_rater(ctx.db, ctx.cfg, t, 1, pa)[0]            # noqa: E731
     assert not check(end - timedelta(seconds=1)) and check(end)
     assert check(end + timedelta(hours=72)) and not check(end + timedelta(hours=72, seconds=1))
     ctx.cfg["vote_window_hours"] = 24
@@ -77,19 +73,19 @@ def test_the_window_opens_at_the_end_and_closes_after_vote_window_hours(ctx, mak
 def test_a_slot_that_ended_early_opens_ratings_early(ctx, make_run, clock):
     run, pa, _ = two_parties(ctx, make_run)
     at(clock, "2026-11-02T23:10")
-    assert not check_vote(ctx.db, ctx.cfg, clock["now"], 1, 2, pa)[0]
+    assert not check_rater(ctx.db, ctx.cfg, clock["now"], 1, pa)[0]
     with ctx.db.conn:
         ctx.db.conn.execute("UPDATE slots SET actual_minutes = 60 WHERE slot_key = ?", (S2,))    # ended 23:00Z
-    assert check_vote(ctx.db, ctx.cfg, clock["now"], 1, 2, pa)[0]
+    assert check_rater(ctx.db, ctx.cfg, clock["now"], 1, pa)[0]
 
 
-def test_cast_vote_stores_only_allowed_votes(ctx, make_run, clock):
+def test_cast_party_rating_stores_only_allowed_ratings(ctx, make_run, clock):
     run, pa, pb = two_parties(ctx, make_run)
     at(clock, ENDED)
-    assert cast_vote(ctx, 1, 2, "like", pa) == (True, "")
-    assert cast_vote(ctx, 1, 1, "like", pa)[0] is False and cast_vote(ctx, 1, 9, "like", pa)[0] is False
-    assert cast_vote(ctx, 1, 2, "love", pa)[0] is False
-    assert ctx.db.conn.execute("SELECT COUNT(*) FROM votes").fetchone()[0] == 1
+    assert cast_party_rating(ctx, 1, pa, "like") == (True, "")
+    assert cast_party_rating(ctx, 9, pa, "like")[0] is False          # not in that party
+    assert cast_party_rating(ctx, 1, pa, "neutral")[0] is False       # only like and dislike
+    assert ctx.db.conn.execute("SELECT COUNT(*) FROM party_ratings").fetchone()[0] == 1
 
 
 def test_rateable_parties_lists_only_open_windows(ctx, make_run, clock):
@@ -106,20 +102,27 @@ def test_rateable_parties_lists_only_open_windows(ctx, make_run, clock):
 
 # ---------------------------------------------------------------- latest wins, neutral, expiry
 
-def test_the_latest_vote_wins_and_neutral_clears_an_earlier_one(ctx, make_run, clock):
+def test_the_latest_rating_wins_and_the_table_is_append_only(ctx, make_run, clock):
     run, pa, _ = two_parties(ctx, make_run)
     at(clock, ENDED)
-    cast_vote(ctx, 1, 2, "like", pa)
-    cast_vote(ctx, 3, 2, "like", pa)
+    cast_party_rating(ctx, 1, pa, "like")
+    cast_party_rating(ctx, 3, pa, "like")
     at(clock, "2026-11-03T00:00")
-    cast_vote(ctx, 1, 2, "dislike", pa)
-    assert current_rating(ctx.db, 1, 2, clock["now"]) == "dislike" and current_rating(ctx.db, 4, 2, clock["now"]) == "neutral"
-    assert ctx.db.conn.execute("SELECT COUNT(*) FROM votes").fetchone()[0] == 3        # append-only
-    at(clock, "2026-11-03T01:00")
-    cast_vote(ctx, 1, 2, "neutral", pa)
+    cast_party_rating(ctx, 1, pa, "dislike")
+    assert ctx.db.party_rating(pa, 1) == "dislike" and ctx.db.party_rating(pa, 3) == "like" and ctx.db.party_rating(pa, 4) is None
+    assert ctx.db.conn.execute("SELECT COUNT(*) FROM party_ratings").fetchone()[0] == 3
+    assert {r["voter_id"]: r["vote"] for r in ctx.db.latest_party_ratings(clock["now"])} == {"1": "dislike", "3": "like"}
+
+
+def test_old_per_player_votes_still_export_as_before(ctx, make_run, clock):
+    run, pa, _ = two_parties(ctx, make_run)
+    slot = ctx.db.party(pa)["slot_id"]
+    t0 = datetime(2026, 11, 3, 0, 0, tzinfo=UTC)
+    ctx.db.add_vote(run["id"], slot, 1, 2, "like", t0)
+    ctx.db.add_vote(run["id"], slot, 3, 2, "like", t0)
+    ctx.db.add_vote(run["id"], slot, 1, 2, "neutral", t0 + timedelta(hours=1))
     ids = [str(i) for i in range(1, 17)]
-    got = votes_for_export(ctx.db, ctx.cfg, ids, clock["now"])
-    assert got == [{"from": "3", "to": "2", "vote": "like"}]                         # 1's neutral removed both
+    assert votes_for_export(ctx.db, ctx.cfg, ids, t0 + timedelta(hours=2)) == [{"from": "3", "to": "2", "vote": "like"}]
 
 
 def test_votes_older_than_the_expiry_are_dropped(ctx, make_run, clock):
@@ -276,14 +279,16 @@ def test_pressing_the_thread_button_opens_a_private_rating_view(ctx, make_run, c
     it = pressed(ctx, 1, pa)
     sent = it.response.sent[0]
     assert sent["ephemeral"] is True and isinstance(sent["view"], RateView)
-    assert "Rate your party" in sent["content"] and "Only you can see this" in sent["content"]
+    assert "How was your party overall" in sent["content"]
+    assert [c.label for c in sent["view"].children] == ["Liked it", "Didn't enjoy it", "Give feedback"]
     assert "You were not in that party." in pressed(ctx, 9, pa).text
     assert "not ended" in pressed(ctx, 9, pb).text
     at(clock, "2026-11-20T00:00")
     assert "window closed" in pressed(ctx, 1, pa).text
 
 
-def test_the_rating_view_saves_each_click_and_shows_the_current_rating(ctx, make_run, clock):
+def test_the_buttons_save_the_party_rating_and_show_the_current_one(ctx, make_run, clock):
+    import discord
     run, pa, _ = two_parties(ctx, make_run)
     at(clock, ENDED)
 
@@ -291,39 +296,21 @@ def test_the_rating_view_saves_each_click_and_shows_the_current_rating(ctx, make
         it = player(1)
         await open_rating(ctx, it, pa)
         view = it.response.sent[0]["view"]
-        emoji = {"like": "👍", "dislike": "👎", "neutral": "😐"}
-        assert len(view.buttons) == 7 and "1" not in [b.target_id for b in view.buttons]      # everyone but me
-        assert all(view.ratings[b.target_id] == "neutral" for b in view.buttons)               # nobody rated yet
-        button = next(b for b in view.buttons if b.target_id == "2")
-        for vote in ("like", "dislike", "neutral"):                                            # one tap = the next rating
-            click = player(1)
-            await button.callback(click)
-            assert view.ratings["2"] == vote and str(button.emoji) == emoji[vote]
-            assert "Rate your party" in click.response.edits[-1]["content"]
-            assert current_rating(ctx.db, "1", "2", ctx.now()) == vote
-        assert ctx.db.conn.execute("SELECT COUNT(*) FROM votes").fetchone()[0] == 3
-        done = player(1)
-        await next(c for c in view.children if getattr(c, "label", "") == "Done").callback(done)
-        assert done.response.edits[-1]["view"] is None
-        stranger = player(2)
-        assert await view.interaction_check(stranger) is False
+        like, dislike, _ = view.children
+        assert like.style == dislike.style == discord.ButtonStyle.secondary and "Your rating" not in view.render()
+        click = player(1)
+        await like.callback(click)
+        assert ctx.db.party_rating(pa, 1) == "like" and like.style == discord.ButtonStyle.success
+        assert "Your rating: 👍" in click.response.edits[-1]["content"]
+        await dislike.callback(player(1))
+        assert ctx.db.party_rating(pa, 1) == "dislike" and dislike.style == discord.ButtonStyle.danger
+        assert like.style == discord.ButtonStyle.secondary
+        assert await view.interaction_check(player(2)) is False
+        again = player(1)                                                 # reopening shows the saved rating
+        await open_rating(ctx, again, pa)
+        assert again.response.sent[0]["view"].rating == "dislike"
     run_async(scenario())
-
-
-def test_the_select_shows_my_current_rating_per_member(ctx, make_run, clock):
-    run, pa, _ = two_parties(ctx, make_run)
-    at(clock, ENDED)
-    cast_vote(ctx, 1, 3, "dislike", pa)
-
-    async def scenario():
-        it = player(1)
-        await open_rating(ctx, it, pa)
-        view = it.response.sent[0]["view"]
-        import discord
-        assert view.ratings["3"] == "dislike" and view.ratings["2"] == "neutral"
-        b3 = next(b for b in view.buttons if b.target_id == "3")
-        assert b3.label == "Player 3 · healer" and str(b3.emoji) == "👎" and b3.style == discord.ButtonStyle.danger
-    run_async(scenario())
+    assert ctx.db.conn.execute("SELECT COUNT(*) FROM party_ratings").fetchone()[0] == 2
 
 
 def test_a_click_after_the_window_closed_saves_nothing(ctx, make_run, clock):
@@ -336,10 +323,243 @@ def test_a_click_after_the_window_closed_saves_nothing(ctx, make_run, clock):
         view = it.response.sent[0]["view"]
         at(clock, "2026-11-20T00:00")                                               # the window closes while it is open
         click = player(1)
-        await next(b for b in view.buttons if b.target_id == "2").callback(click)
+        await view.children[0].callback(click)
         assert "Nothing was saved" in click.response.edits[-1]["content"]
+        fb = player(1)
+        await view.children[2].callback(fb)                                         # no form once it is closed
+        assert not fb.response.modals and "window closed" in fb.response.edits[-1]["content"]
     run_async(scenario())
-    assert ctx.db.conn.execute("SELECT COUNT(*) FROM votes").fetchone()[0] == 0
+    assert ctx.db.conn.execute("SELECT COUNT(*) FROM party_ratings").fetchone()[0] == 0
+
+
+# ---------------------------------------------------------------- feedback
+
+def send(ctx, reporter, party, targets, category, note=""):
+    return submit_feedback(ctx, reporter, party, targets, category, note)
+
+
+def test_feedback_names_players_of_the_same_party_and_replaces_the_earlier_one(ctx, make_run, clock):
+    run, pa, _ = two_parties(ctx, make_run)
+    at(clock, ENDED)
+    assert send(ctx, 1, pa, [2, 3], "toxic", "  shouted  ") == (True, "")
+    rows = ctx.db.party_feedback_by(pa, 1)
+    assert [(r["target_id"], r["category"], r["note"]) for r in rows] == [("2", "toxic", "shouted"), ("3", "toxic", "shouted")]
+    assert send(ctx, 1, pa, [4], "late_no_show") == (True, "")                  # another category is added ...
+    assert [(r["target_id"], r["category"]) for r in ctx.db.party_feedback_by(pa, 1)] == [
+        ("2", "toxic"), ("3", "toxic"), ("4", "late_no_show")]
+    assert send(ctx, 1, pa, [5], "toxic", "again") == (True, "")                 # ... the same category replaces
+    assert [(r["target_id"], r["category"], r["note"]) for r in ctx.db.party_feedback_by(pa, 1)] == [
+        ("4", "late_no_show", ""), ("5", "toxic", "again")]
+    assert send(ctx, 1, pa, [], "other", "great run") == (True, "")              # naming nobody is fine
+    assert [r["target_id"] for r in ctx.db.party_feedback_by(pa, 1) if r["category"] == "other"] == [None]
+    assert "yourself" in send(ctx, 1, pa, [1], "toxic")[1]
+    assert "not in your party" in send(ctx, 1, pa, [9], "toxic")[1]
+    assert "not in that party" in send(ctx, 9, pa, [2], "toxic")[1]
+    assert "Pick what happened" in send(ctx, 1, pa, [2], "rude")[1]
+    at(clock, "2026-11-20T00:00")
+    assert "window closed" in send(ctx, 1, pa, [2], "toxic")[1]
+    assert len(ctx.db.party_feedback_by(pa, 1)) == 3                              # nothing changed
+
+
+def test_the_feedback_modal_collects_players_category_and_details(ctx, make_run, clock):
+    run, pa, _ = two_parties(ctx, make_run)
+    at(clock, ENDED)
+
+    async def scenario():
+        it = player(1)
+        await open_rating(ctx, it, pa)
+        view = it.response.sent[0]["view"]
+        click = player(1)
+        await view.children[2].callback(click)
+        [modal] = click.response.modals
+        assert isinstance(modal, FeedbackModal) and len(modal.children) == 3
+        assert "1" not in [o.value for o in modal.players.options] and len(modal.players.options) == 7
+        assert modal.players.required is False and modal.note.required is False
+        modal.players._values, modal.category._values, modal.note._value = ["2"], ["communication"], "never spoke"
+        sub = player(1)
+        await modal.on_submit(sub)
+        assert "without your name" in sub.text
+        again = player(1)                                                        # reopening starts from what was sent
+        await view.children[2].callback(again)
+        [modal2] = again.response.modals
+        assert [o.value for o in modal2.players.options if o.default] == ["2"]
+        assert [o.value for o in modal2.category.options if o.default] == ["communication"]
+        assert modal2.note.default == "never spoke"
+        modal2.players._values, modal2.category._values, modal2.note._value = ["3"], ["late_no_show"], ""
+        await modal2.on_submit(player(1))                                         # a second category sits next to it
+        third = player(1)
+        await view.children[2].callback(third)
+        assert [o.value for o in third.response.modals[0].category.options if o.default] == ["late_no_show"]
+    run_async(scenario())
+    assert [(r["target_id"], r["category"], r["note"]) for r in ctx.db.party_feedback_by(pa, 1)] == [
+        ("2", "communication", "never spoke"), ("3", "late_no_show", "")]
+
+
+def test_a_swapped_out_players_ratings_and_feedback_go_with_them(ctx, make_run, clock):
+    run, pa, _ = two_parties(ctx, make_run)
+    at(clock, ENDED)
+    cast_party_rating(ctx, 2, pa, "like")
+    cast_party_rating(ctx, 3, pa, "like")
+    send(ctx, 2, pa, [3], "toxic")
+    send(ctx, 4, pa, [2], "toxic")
+    send(ctx, 4, pa, [5], "late_no_show")
+    ctx.db.upsert_player(20, "Sub", now=NOW)
+    ctx.db.swap_member(pa, 2, 20, "regen", 99, clock["now"], reason_code="no_show", reason_text="")
+    assert [r["voter_id"] for r in ctx.db.latest_party_ratings(clock["now"])] == ["3"]
+    left = ctx.db.conn.execute("SELECT reporter_id, target_id FROM party_feedback").fetchall()
+    assert [(r["reporter_id"], r["target_id"]) for r in left] == [("4", "5")]
+
+
+# ---------------------------------------------------------------- inferred compatibility and weighted tags
+
+ROLE_CYCLE = ["main_tank", "off_tank", "regen", "shield", "melee", "melee", "ranged", "caster"]
+RATED_AT = datetime(2026, 11, 3, 12, 0, tzinfo=UTC)
+AS_OF = RATED_AT + timedelta(days=1)
+
+
+def history(ctx, make_run, groups, voter=1):
+    """Confirmed parties in slot S2, one per group: `voter` plus the group's other players. `groups` is a list of
+    (other player ids, vote); the voter's rating for each is stored. Returns the party ids."""
+    run = make_run(per_day=True)
+    parties = [{"slot_key": S2, "party_index": k, "target_idx": 0,
+                "members": [{"discord_id": i, "role": ROLE_CYCLE[n % 8], "helper": False, "placed_down": False,
+                             "distance": 0} for n, i in enumerate([voter, *others])]}
+               for k, (others, _) in enumerate(groups)]
+    for i in {voter, *(o for others, _ in groups for o in others)}:
+        ctx.db.upsert_player(i, f"P{i}", now=NOW)
+    ctx.db.replace_draft(run["id"], parties, [], D2)
+    confirm(ctx, run)
+    pids = [p["id"] for p in sorted(ctx.db.parties(run["id"]), key=lambda p: p["party_index"])]
+    for pid, (_, vote) in zip(pids, groups):
+        ctx.db.add_party_rating(ctx.db.party(pid), voter, vote, RATED_AT)
+    return pids
+
+
+def export(ctx, ids=range(1, 17), as_of=AS_OF):
+    return votes_for_export(ctx.db, ctx.cfg, [str(i) for i in ids], as_of)
+
+
+def test_a_player_who_always_comes_with_good_parties_is_inferred_as_liked(ctx, make_run):
+    history(ctx, make_run, [([2, 3], "like")] * 4 + [([4, 5], "dislike")] * 4)
+    got = {(e["from"], e["to"]): e for e in export(ctx)}
+    # 4 parties with, 4 without: diff = (1 - -1) / 2 = 1, shrunk by n / (n + 2) with n = 4*4/8 = 2 -> 0.5
+    assert got[("1", "2")] == {"from": "1", "to": "2", "vote": "like", "weight": 0.5}
+    assert got[("1", "3")]["vote"] == "like"
+    assert got[("1", "4")] == {"from": "1", "to": "4", "vote": "dislike", "weight": 0.5}
+    assert all(k[0] == "1" for k in got)                                       # only the voter's own pairs
+
+
+def test_inference_ignores_thin_data_and_indiscriminate_voters(ctx, make_run):
+    history(ctx, make_run, [([2], "like")] * 2 + [([3], "dislike")] * 4)         # player 2 only came twice
+    assert [e for e in export(ctx) if e["to"] == "2"] == []                    # below compat_min_parties (3)
+    assert [e["to"] for e in export(ctx)] == ["3"]                              # 4 parties with: enough
+
+
+def test_someone_who_rates_everything_alike_says_nothing_about_anyone(ctx, make_run):
+    history(ctx, make_run, [([2], "like")] * 3 + [([3], "like")] * 3)
+    assert export(ctx) == []
+
+
+def test_a_fixed_group_cannot_be_told_apart(ctx, make_run):
+    history(ctx, make_run, [([2, 3], "like")] * 5)                              # nothing without them to compare with
+    assert export(ctx) == []
+
+
+def test_more_data_makes_the_inferred_score_stronger(ctx, make_run):
+    few = history(ctx, make_run, [([2], "like")] * 3 + [([3], "dislike")] * 3)
+    s_few = inferred_scores(ctx.db, ctx.cfg, AS_OF, AS_OF - timedelta(days=90))[("1", "2")]
+    assert 0 < s_few < 0.5
+    with ctx.db.conn:                                                           # same voter, many more parties
+        ctx.db.conn.execute("DELETE FROM party_ratings")
+    many = [([2], "like")] * 12 + [([3], "dislike")] * 12
+    ctx.db.conn.execute("DELETE FROM runs")
+    history(ctx, make_run, many)
+    assert inferred_scores(ctx.db, ctx.cfg, AS_OF, AS_OF - timedelta(days=90))[("1", "2")] > s_few
+
+
+def test_ratings_inside_the_window_and_before_as_of_only(ctx, make_run):
+    history(ctx, make_run, [([2], "like")] * 4 + [([3], "dislike")] * 4)
+    assert export(ctx, as_of=RATED_AT - timedelta(minutes=1)) == []              # not rated yet at that time
+    assert export(ctx, as_of=RATED_AT + timedelta(days=91)) == []                # expired
+    assert export(ctx, ids=[1, 3]) != [] and [e["to"] for e in export(ctx, ids=[1, 3])] == ["3"]   # 2 is not exported
+
+
+def test_tagged_feedback_is_a_weighted_dislike_that_fades(ctx, make_run, clock):
+    run, pa, _ = two_parties(ctx, make_run)
+    at(clock, ENDED)
+    send(ctx, 1, pa, [2], "toxic")
+    send(ctx, 3, pa, [2], "communication")
+    send(ctx, 4, pa, [2], "late_no_show")
+    send(ctx, 5, pa, [2], "performance")
+    send(ctx, 6, pa, [], "toxic")                                               # names nobody: no effect
+    now = clock["now"]
+    got = {(e["from"], e["to"]): e for e in votes_for_export(ctx.db, ctx.cfg, [str(i) for i in range(1, 9)], now)}
+    assert got[("1", "2")] == {"from": "1", "to": "2", "vote": "dislike"}                           # 1.0 -> no weight key
+    assert got[("3", "2")]["weight"] == 0.5 and got[("4", "2")]["weight"] == 0.2
+    assert ("5", "2") not in got and ("6", "2") not in got                       # weight 0 and nobody named
+    later = votes_for_export(ctx.db, ctx.cfg, [str(i) for i in range(1, 9)], now + timedelta(days=45))
+    assert {(e["from"]): e["weight"] for e in later if e["to"] == "2"} == {"1": 0.5, "3": 0.25, "4": 0.1}   # half faded
+    assert [e for e in votes_for_export(ctx.db, ctx.cfg, [str(i) for i in range(1, 9)], now + timedelta(days=91))] == []
+    ctx.cfg["feedback_weights"] = {"toxic": 2.0, "late_no_show": 0}
+    tuned = {e["from"]: e for e in votes_for_export(ctx.db, ctx.cfg, [str(i) for i in range(1, 9)], now) if e["to"] == "2"}
+    assert tuned["1"]["weight"] == 2.0 and "4" not in tuned and tuned["3"]["weight"] == 0.5
+
+
+def test_old_votes_inferred_scores_and_tags_add_up_per_pair(ctx, make_run):
+    pids = history(ctx, make_run, [([2], "like")] * 4 + [([3], "dislike")] * 4)
+    slot = ctx.db.party(pids[0])["slot_id"]
+    ctx.db.add_vote(ctx.db.party(pids[0])["run_id"], slot, 1, 2, "like", RATED_AT)           # +1 old like, +0.5 inferred
+    got = {(e["from"], e["to"]): e for e in export(ctx)}
+    assert got[("1", "2")] == {"from": "1", "to": "2", "vote": "like"}                        # 1.5 is capped at 1.0
+    ctx.db.replace_party_feedback(ctx.db.party(pids[0]), 1, "toxic", [(2, "")], RATED_AT)    # -1 -> net 0.5 like
+    assert {(e["from"], e["to"]): e for e in export(ctx, as_of=RATED_AT)}[("1", "2")]["weight"] == 0.5     # no fading yet
+
+
+def test_the_solver_entries_are_sorted_and_repeatable(ctx, make_run):
+    history(ctx, make_run, [([2], "like")] * 4 + [([3], "dislike")] * 4)
+    assert export(ctx) == export(ctx)
+    ids = [(int(e["from"]), int(e["to"])) for e in export(ctx)]
+    assert ids == sorted(ids)
+
+
+def test_organizer_summaries_never_show_reporters(ctx, make_run, clock):
+    run, pa, _ = two_parties(ctx, make_run)
+    at(clock, ENDED)
+    for voter in (1, 3, 4):
+        cast_party_rating(ctx, voter, pa, "like")
+    cast_party_rating(ctx, 5, pa, "dislike")
+    send(ctx, 1, pa, [2], "toxic", "screamed at the healer")
+    send(ctx, 3, pa, [2], "toxic")
+    send(ctx, 4, pa, [2], "late_no_show", "ten minutes late")
+    send(ctx, 5, pa, [], "other", "voice chat was broken")
+    now = clock["now"]
+    assert party_rating_counts(ctx.db, ctx.cfg, now)["2"] == (3, 1)                # the player's own rating is not counted
+    assert party_rating_counts(ctx.db, ctx.cfg, now)["1"] == (2, 1)
+    reports, general = feedback_counts(ctx.db, ctx.cfg, now)
+    assert reports == {"2": {"toxic": 2, "late_no_show": 1}} and general == 1
+    for who in (1, 2, 5):
+        ctx.db.upsert_player(who, f"P{who}", now=NOW)
+
+    it = organizer()
+    run_async(handlers.feedback_summary(ctx, it))
+    text = it.text
+    assert "P2" in text and "toxic or hostile behaviour ×2" in text and "late or no-show ×1" in text and "parties 👍 3 / 👎 1" in text
+    assert "**P1**: parties 👍 2 / 👎 1" in text and "1 report(s) named nobody" in text
+    ctx.cfg["vote_floor"] = 4                                                    # P1 has 3 ratings: hidden, P2 has 4: shown
+    floor = organizer()
+    run_async(handlers.feedback_summary(ctx, floor))
+    assert "**P1**" not in floor.text and "parties 👍 3 / 👎 1" in floor.text and "fewer than 4 ratings not shown" in floor.text
+    ctx.cfg["vote_floor"] = 3
+    note = organizer()
+    run_async(handlers.feedback_player(ctx, note, type("M", (), {"id": 2})()))
+    assert "screamed at the healer" in note.text and "ten minutes late" in note.text
+    assert "P1" not in note.text and "P3" not in note.text and "P4" not in note.text      # nobody who reported
+    general_notes = organizer()
+    run_async(handlers.feedback_player(ctx, general_notes, None))
+    assert "voice chat was broken" in general_notes.text and "P5" not in general_notes.text
+    stranger = player(9)
+    run_async(handlers.feedback_summary(ctx, stranger))
+    assert "organizer" in stranger.text.lower() and "screamed" not in stranger.text
 
 
 def test_the_rate_command_lists_rateable_parties_and_opens_the_same_view(ctx, make_run, clock):
@@ -385,7 +605,7 @@ def test_the_loop_posts_the_rate_buttons_once_when_a_slot_ends(ctx, make_run, cl
     assert [c.item.label for c in msg["view"].children] == ["Rate party 1"]
     assert [c.item.custom_id for c in msg["view"].children] == [f"rate:{pa}"]
     assert run_async(post_rating_prompts(ctx)) == 0                                  # once only
-    assert len(chan.threads[7001].sent) == 1                                         # S2B had no prompt yet
+    assert not [m for m in chan.threads[7001].sent if "Rate your party" in (m["content"] or "")]   # S2B had no prompt yet
     at(clock, "2026-11-03T03:00")
     assert run_async(post_rating_prompts(ctx)) == 1
 
@@ -429,7 +649,7 @@ def test_rating_strings_and_components_respect_discords_limits(ctx, make_run, cl
     ids = add_party_players(ctx, run, [S2])
     for i in ids:
         ctx.db.upsert_player(i, long[:-len(i)] + i)                  # 32-character display names
-    roles = ["tank"] * 2 + ["healer"] * 2 + ["dps"] * 4
+    roles = ["main_tank", "off_tank", "regen", "shield", "melee", "melee", "ranged", "caster"]
     ctx.db.replace_draft(run["id"], [{"slot_key": S2, "party_index": 0, "target_idx": 18, "members": [
         {"discord_id": i, "role": r, "helper": False, "placed_down": False, "distance": 0} for i, r in zip(ids, roles)]}],
         [], D2)
@@ -443,11 +663,20 @@ def test_rating_strings_and_components_respect_discords_limits(ctx, make_run, cl
         view = it.response.sent[0]["view"]
         assert len(it.response.sent[0]["content"]) <= 2000
         step = player(1)
-        await next(b for b in view.buttons if b.target_id == ids[1]).callback(step)
+        await view.children[0].callback(step)
         assert len(step.response.edits[-1]["content"]) <= 2000
-        assert {c.row for c in view.children} <= {0, 1, 2, 3, 4} and len(view.children) <= 5 * 5
-        for b in view.buttons:
+        assert {c.row for c in view.children if c.row is not None} <= {0, 1, 2, 3, 4} and len(view.children) <= 5 * 5
+        for b in view.children:
             assert 1 <= len(b.label) <= 80
+        fb = player(1)                                              # the feedback form: 32-character names, 8 players
+        await view.children[2].callback(fb)
+        [modal] = fb.response.modals
+        assert len(modal.title) <= 45 and len(modal.children) <= 5
+        for o in [*modal.players.options, *modal.category.options]:
+            assert 1 <= len(o.label) <= 100 and len(o.value) <= 100
+        assert len(modal.players.options) <= 25 and len(modal.note.placeholder) <= 100
+        for label in modal.children:
+            assert len(label.text) <= 45 and len(label.description or "") <= 100
         many = [{"id": n, "party_index": n} for n in range(1, 40)]
         prompt = RatePromptView(many)
         assert len(prompt.children) == 25                           # never more than Discord's 25 buttons
@@ -456,38 +685,3 @@ def test_rating_strings_and_components_respect_discords_limits(ctx, make_run, cl
         listing = RateListView(ctx, parties)
         assert len(listing.children) == 20 and all(len(c.label) <= 80 for c in listing.children)
     run_async(scenario())
-
-
-# ---------------------------------------------------------------- migration from the previous schema
-
-def test_migration_from_the_previous_schema_adds_votes_and_the_thread_columns(tmp_path):
-    path = str(tmp_path / "old.sqlite3")
-    conn = sqlite3.connect(path)
-    conn.executescript(OLD.read_text())                  # schema exactly as the second commit had it
-    conn.execute("INSERT INTO runs (guild_id, name, fight_id, start_date, end_date, signup_deadline_utc, status, "
-                 "created_by, created_utc) VALUES ('1', 'Old', 1, '2026-11-02', '2026-11-02', "
-                 "'2026-11-01T04:59:00+00:00', 'open', '1', '2026-10-25T12:00:00+00:00')")
-    conn.execute("INSERT INTO slots (run_id, slot_key, start_utc, minutes) VALUES (1, '2026-11-02T17:00', "
-                 "'2026-11-02T22:00:00+00:00', 90)")
-    conn.execute("INSERT INTO parties (run_id, slot_id, party_index, status, target_idx) VALUES (1, 1, 0, 'confirmed', 0)")
-    conn.commit()
-    names = lambda t: {r[1] for r in conn.execute(f"PRAGMA table_info({t})")}       # noqa: E731
-    assert "thread_id" not in names("slots") and "message_id" not in names("parties")
-    assert "answer" in names("votes") and "vote" not in names("votes")           # the old, unused yes/no table
-    conn.execute("INSERT INTO votes (slot_id, voter_id, target_id, answer, created_utc) "
-                 "VALUES (1, '5', '6', 'yes', '2026-11-03T00:00:00+00:00'), (1, '6', '5', 'no', '2026-11-03T00:00:00+00:00')")
-    conn.commit()
-    conn.close()
-
-    db = DB(path)
-    cols = lambda t: {r["name"] for r in db.conn.execute(f"PRAGMA table_info({t})")}    # noqa: E731
-    assert {"thread_id", "rating_posted_utc"} <= cols("slots") and "message_id" in cols("parties")
-    assert {"voter_id", "target_id", "vote", "created_utc"} <= cols("votes")
-    assert db.party(1)["status"] == "confirmed" and db.slots_awaiting_rating() == []
-    assert [(r["voter_id"], r["target_id"], r["vote"], r["run_id"]) for r in db.conn.execute("SELECT * FROM votes ORDER BY id")] == [
-        ("5", "6", "like", 1), ("6", "5", "dislike", 1)]                      # old rows were converted, not lost
-    assert not db.conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'votes_old'").fetchone()
-    db.add_vote(1, 1, 5, 6, "like", datetime(2026, 11, 3, tzinfo=UTC))
-    with pytest.raises(sqlite3.IntegrityError):
-        db.add_vote(1, 1, 5, 6, "love", datetime(2026, 11, 3, tzinfo=UTC))
-    DB(path).close()                                      # starting again changes nothing

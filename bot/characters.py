@@ -5,6 +5,7 @@ Profile, and /character verify checks it. Only verified characters exist in `cha
 id is the identity, so a rename or transfer never breaks the link. One pending claim per player.
 FFLogs ids are looked up after verification and used to keep name/world current (see `refresh`).
 No Discord imports, so services.py and the signup code can use it.
+The tables themselves belong to the dashboard's migrations (dashboard/server/app/migrations/).
 """
 import re
 import secrets
@@ -17,54 +18,6 @@ WORLD_RE = re.compile(r"^[A-Za-z]{3,20}$")
 TOKEN_TTL = timedelta(hours=1)
 VERIFY_COOLDOWN = timedelta(seconds=30)      # between Lodestone lookups per player
 MAX_CHARACTERS = 8
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS characters (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    discord_id   TEXT NOT NULL REFERENCES players(discord_id),
-    lodestone_id TEXT NOT NULL UNIQUE,
-    name         TEXT NOT NULL,
-    world        TEXT NOT NULL,
-    fflogs_id    INTEGER,
-    verified_utc TEXT NOT NULL,
-    synced_utc   TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_characters_owner ON characters(discord_id);
--- Which character a player brings on a given day of a run. No row = their only character, if they have one.
-CREATE TABLE IF NOT EXISTS signup_characters (
-    run_id       INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-    day          TEXT NOT NULL,
-    discord_id   TEXT NOT NULL REFERENCES players(discord_id),
-    character_id INTEGER REFERENCES characters(id) ON DELETE SET NULL,
-    PRIMARY KEY (run_id, day, discord_id)
-);
-CREATE TABLE IF NOT EXISTS character_claims (
-    discord_id   TEXT PRIMARY KEY REFERENCES players(discord_id),
-    name         TEXT NOT NULL,
-    world        TEXT NOT NULL,
-    token        TEXT NOT NULL,
-    token_utc    TEXT NOT NULL,
-    last_try_utc TEXT
-);
-"""
-
-
-def ensure_schema(conn):
-    """Create the tables, migrating the first (soft-link) version of `characters` if it is there."""
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(characters)")]
-    if cols and "id" not in cols:
-        conn.execute("DROP INDEX IF EXISTS idx_characters_lodestone")
-        conn.execute("DROP INDEX IF EXISTS idx_characters_name")
-        conn.execute("ALTER TABLE characters RENAME TO characters_old")
-        conn.executescript(SCHEMA)
-        conn.execute("""INSERT INTO characters (discord_id, lodestone_id, name, world, verified_utc)
-                        SELECT discord_id, lodestone_id, name, world, verified_utc
-                        FROM characters_old WHERE lodestone_id IS NOT NULL""")
-        conn.execute("DROP TABLE characters_old")
-        conn.commit()
-    else:
-        conn.executescript(SCHEMA)
-
 
 def parse_character(name, world):
     """Tidy what a player typed. Raises ValueError with a player-friendly message."""

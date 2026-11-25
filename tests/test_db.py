@@ -1,14 +1,14 @@
-import sqlite3
+import psycopg
 import pytest
 
-from bot.db import DB, DraftConflict, DuplicateRun
+from bot.db import DB, DraftConflict, DuplicateRun, SchemaNotReady
+import bot.db
 from conftest import NOW, add_player, confirm, fill_one_party
 
 
-def test_schema_is_idempotent_and_syncs_the_fight_once(tmp_path):
-    path = str(tmp_path / "bot.sqlite3")
-    DB(path).close()
-    db = DB(path)                                   # opening again re-runs schema.sql
+def test_opening_twice_is_fine_and_syncs_the_fight_once(db_url):
+    DB(db_url).close()
+    db = DB(db_url)                                   # opening again changes nothing
     assert len(db.fights()) == 1
     assert len(db.checkpoints(1)) == 20           # the 19 points of the test file plus the automatic Clear
 
@@ -32,7 +32,7 @@ def test_find_fight_by_short_name_and_partial(ctx):
 
 def test_foreign_keys_are_enforced(ctx, make_run):
     run = make_run()
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(psycopg.errors.ForeignKeyViolation):
         ctx.db.conn.execute("INSERT INTO availability (run_id, discord_id, slot_id) VALUES (?, 'ghost', 1)",
                             (run["id"],))
 
@@ -61,9 +61,9 @@ def test_get_run_by_name_and_newest(ctx, make_run):
 
 
 def test_upsert_player_updates_only_given_fields(ctx):
-    ctx.db.upsert_player(5, "Ann", roles=["dps", "tank"], prog_index=3, now=NOW)
+    ctx.db.upsert_player(5, "Ann", roles=["melee", "main_tank"], prog_index=3, now=NOW)
     p = ctx.db.upsert_player(5, "Ann the Tank", timezone="America/Chicago", now=NOW)
-    assert p["display_name"] == "Ann the Tank" and p["roles"] == "tank,dps"       # fixed role order
+    assert p["display_name"] == "Ann the Tank" and p["roles"] == "main_tank,melee"       # fixed role order
     assert p["prog_index"] == 3 and p["timezone"] == "America/Chicago"
     assert ctx.db.upsert_player(5, "Ann the Tank", prog_index=0)["prog_index"] == 0   # 0 is a real value
 
@@ -95,7 +95,7 @@ def test_helper_grant_and_revoke(ctx):
 
 
 def _party(slot, idx, ids):
-    roles = ["tank"] * 2 + ["healer"] * 2 + ["dps"] * 4
+    roles = ["main_tank", "off_tank", "regen", "shield", "melee", "melee", "ranged", "caster"]
     return {"slot_key": slot, "party_index": idx, "target_idx": 0,
             "members": [{"discord_id": str(i), "role": r, "helper": False, "placed_down": False, "distance": 0}
                         for i, r in zip(ids, roles)]}
@@ -124,7 +124,7 @@ def test_replace_draft_refuses_to_overwrite_confirmed_parties(ctx, make_run):
 def test_previous_unmatched_lists_ticked_players_without_a_party(ctx, make_run):
     old = make_run("Old", status="closed")
     ids = fill_one_party(ctx, old)
-    add_player(ctx, old, 99, ["dps"], 0, ["2026-11-02T20:00"])     # ticked, never seated
+    add_player(ctx, old, 99, ["melee"], 0, ["2026-11-02T20:00"])     # ticked, never seated
     ctx.db.replace_draft(old["id"], [_party("2026-11-02T17:00", 0, ids)], [])
     new = make_run("New")
     assert ctx.db.previous_unmatched(new) == set()                 # an unapproved draft does not count
@@ -152,3 +152,77 @@ def test_replace_draft_with_a_day_ignores_confirmed_parties_on_other_days(ctx, m
     ctx.db.replace_draft(run["id"], [_party("2026-11-02T17:00", 0, ids)], [], day="2026-11-02")
     with pytest.raises(DraftConflict):
         ctx.db.replace_draft(run["id"], [], [], day="2026-11-01")
+
+
+# ---------------------------------------------------------------- the dashboard owns the schema
+
+def tables(url):
+    with psycopg.connect(url, autocommit=True) as conn:
+        return conn.execute("SELECT table_name FROM information_schema.tables "
+                            "WHERE table_schema = current_schema() ORDER BY 1").fetchall()
+
+
+def test_the_bot_refuses_a_database_nobody_migrated(unmigrated_url):
+    with pytest.raises(SchemaNotReady, match=r"schema version 0 .*python -m app\.migrate"):
+        DB(unmigrated_url)
+    assert tables(unmigrated_url) == []                     # and created nothing
+
+
+def test_the_bot_refuses_a_database_behind_the_version_it_needs(db_url, monkeypatch):
+    from conftest import dashboard_migrate as mig
+    newest = max(int(f.name[:4]) for f in mig.MIGRATIONS_DIR.glob("[0-9]*.sql"))     # db_url has all of them applied
+    monkeypatch.setattr(bot.db, "REQUIRED_SCHEMA_VERSION", newest + 1)
+    with pytest.raises(SchemaNotReady, match=f"needs {newest + 1}"):
+        DB(db_url)
+
+
+def test_opening_a_migrated_database_changes_no_table(db_url):
+    DB(db_url).close()
+    before = tables(db_url)
+    DB(db_url).close()
+    assert tables(db_url) == before and ("schema_migrations",) in [tuple(r) for r in before]
+
+
+def test_a_database_ahead_of_the_bot_is_fine(db_url):
+    with psycopg.connect(db_url, autocommit=True) as conn:
+        conn.execute("INSERT INTO schema_migrations (version, name, checksum, applied_utc) VALUES (99, 'later', 'x', 'x')")
+    DB(db_url).close()
+
+
+def test_a_lost_connection_is_reopened_for_the_next_statement(ctx):
+    ctx.db.conn._c.close()                                    # what a database restart or idle timeout looks like
+    assert ctx.db.fights()[0]["short_name"] == "UWU"
+
+
+def test_parse_role_accepts_the_usual_spellings():
+    from bot.config import parse_role
+    assert parse_role("Main tank") == "main_tank" and parse_role(" off-tank ") == "off_tank"
+    assert parse_role("CASTER") == "caster" and parse_role("dps") is None and parse_role("") is None
+
+
+def test_migration_0002_refuses_old_roles_and_then_accepts_the_new_ones(unmigrated_url, tmp_path):
+    """A database with tank/healer/dps parties is not converted behind your back: it stops with a message."""
+    import shutil
+    from conftest import dashboard_migrate as mig
+    folder = tmp_path / "only_0001"
+    folder.mkdir()
+    shutil.copy(mig.MIGRATIONS_DIR / "0001_baseline.sql", folder)
+    with psycopg.connect(unmigrated_url, autocommit=True) as conn:
+        assert mig.apply_migrations(conn, folder) == [1]
+        conn.execute("INSERT INTO fights (id, name, short_name) VALUES (1, 'F', 'F')")
+        conn.execute("INSERT INTO runs (guild_id, name, fight_id, start_date, end_date, signup_deadline_utc, status, "
+                     "created_by, created_utc) VALUES ('1', 'r', 1, '2026-11-01', '2026-11-01', 'x', 'open', '1', 'x')")
+        conn.execute("INSERT INTO slots (run_id, slot_key, start_utc, minutes) VALUES (1, 'k', 'x', 90)")
+        conn.execute("INSERT INTO players (discord_id, display_name) VALUES ('9', 'Old')")
+        conn.execute("INSERT INTO parties (run_id, slot_id, party_index, status, target_idx) VALUES (1, 1, 0, 'draft', 0)")
+        conn.execute("INSERT INTO party_members (party_id, discord_id, role) VALUES (1, '9', 'dps')")
+        with pytest.raises(mig.MigrationError, match="old tank/healer/dps roles"):
+            mig.apply_migrations(conn)
+        assert mig.current_version(conn) == 1                       # rolled back, nothing half-converted
+        conn.execute("DELETE FROM parties")
+        newest = max(int(f.name[:4]) for f in mig.MIGRATIONS_DIR.glob("[0-9]*.sql"))
+        assert mig.apply_migrations(conn) == list(range(2, newest + 1))      # 0002 and everything after it
+        conn.execute("INSERT INTO parties (run_id, slot_id, party_index, status, target_idx) VALUES (1, 1, 0, 'draft', 0)")
+        conn.execute("INSERT INTO party_members (party_id, discord_id, role) VALUES (2, '9', 'caster')")
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute("INSERT INTO party_members (party_id, discord_id, role) VALUES (2, '9', 'dps')")

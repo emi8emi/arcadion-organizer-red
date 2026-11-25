@@ -8,7 +8,7 @@
   "default_max_per_run": 99,
   "max_run_days": 14,
 
-  "party": {"tank": 2, "healer": 2, "dps": 4},
+  "party": {"main_tank": 1, "off_tank": 1, "regen": 1, "shield": 1, "melee": 2, "ranged": 1, "caster": 1},
 
   "solver_phase_cross_cost": 3,
 
@@ -16,6 +16,7 @@
   "cutoff_days_before": 1,
   "reminder_channel_id": null,
   "reminder_interval_minutes": 30,
+  "dm_on_confirm": true,
 
   "parties_channel_id": null,
   "vote_window_hours": 72,
@@ -23,6 +24,5 @@
   "vote_floor": 3,
 
   "organizer_role_id": null,
-  "db_path": "raidbot.sqlite3",
   "export_dir": "exports"
 }

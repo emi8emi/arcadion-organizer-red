@@ -2,7 +2,7 @@
 from collections import defaultdict
 from datetime import date
 
-from .config import ROLES
+from .config import ROLES, ROLE_SHORT
 from .db import split_roles
 
 MESSAGE_LIMIT = 1900     # Discord allows 2000 characters per message
@@ -58,9 +58,7 @@ def slot_table(db, run, cfg):
         role_sets = [set(split_roles(r["roles"])) for r in rows]
         table.append({
             "key": s["slot_key"],
-            "tank": sum("tank" in rs for rs in role_sets),
-            "healer": sum("healer" in rs for rs in role_sets),
-            "dps": sum("dps" in rs for rs in role_sets),
+            "roles": {r: sum(r in rs for rs in role_sets) for r in ROLES},
             "total": len(rows),
             "parties": estimate_parties(role_sets, cfg["party"]),
         })
@@ -88,7 +86,7 @@ def render(db, run, cfg, day=None, preface=None):
 
     head = [f"**{run['name']}** ({run['status']}): {len(signed)} players have ticked slots"
             + (f", {len(incomplete)} still need roles or prog" if incomplete else "") + ".",
-            f"Times are {cfg['timezone']}. T/H/D = ticked players who can play that role (flex players count in each). "
+            f"Times are {cfg['timezone']}. MT/OT = main/off tank, RG/SH = regen/shield healer, ML/RN/CS = melee/ranged/caster: ticked players who can play that role (flex players count in each). "
             "\"fill\" = full parties the role mix could support, ignoring prog and limits; `--` = cannot fill."]
     if preface:
         head = head[:1] + list(preface) + head[1:]
@@ -101,10 +99,11 @@ def render(db, run, cfg, day=None, preface=None):
     blocks = []
     for d in sorted(days):
         title = date.fromisoformat(d).strftime("%a %d %b")
-        lines = [" time    T  H  D  all  fill"]
+        lines = [" time   " + " ".join(f"{ROLE_SHORT[r]:>2}" for r in ROLES) + "  all  fill"]
         for row in days[d]:
             mark = f"✓ ~{row['parties']}" if row["parties"] else "--"
-            lines.append(f"{row['key'][11:16]}  {row['tank']:>2} {row['healer']:>2} {row['dps']:>2}  {row['total']:>3}  {mark}")
+            counts = " ".join(f"{row['roles'][r]:>2}" for r in ROLES)
+            lines.append(f"{row['key'][11:16]}  {counts}  {row['total']:>3}  {mark}")
         blocks.append(f"**{title}**\n```\n" + "\n".join(lines) + "\n```")
     if not blocks:
         blocks.append("No one has ticked any slots yet." if not day else "No ticks on that day.")

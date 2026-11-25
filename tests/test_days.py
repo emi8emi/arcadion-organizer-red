@@ -1,22 +1,17 @@
 """Per-day signup cutoffs: the cutoff clock, gating, /run close and /run extend, status, the old-schema migration."""
 import re
-import sqlite3
 from datetime import date, datetime, timezone
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import discord
 
 from bot import handlers
-from bot.config import load_config
-from bot.db import DB
-from bot.grid import GridConfig, day_cutoff, parse_hm
-from bot.services import Ctx, day_state, signup_open
-from conftest import NOW, S1, S2, at, organizer, player, run_async
+from bot.grid import day_cutoff, parse_hm
+from bot.services import day_state, signup_open
+from conftest import NOW, S1, S2, at, organizer, pick_roles, player, run_async
 
 UTC = timezone.utc
 NY = "America/New_York"
-OLD_SCHEMA = Path(__file__).resolve().parent / "fixtures" / "schema_before_run_days.sql"
 
 
 def do(ctx, handler, it, *args, **kwargs):
@@ -83,17 +78,17 @@ def test_closed_day_is_locked_but_other_days_still_save(ctx, make_run, clock):
 
         view.day_select._values = ["2026-11-01"]
         await view.day_select.callback(player(5))
-        assert view.slot_select.disabled and "closed" in view.slot_select.placeholder
+        assert view.slot_select.disabled and "locked" in view.slot_select.placeholder
         late = player(5)                                            # a client that sends the edit anyway
         view.slot_select._values = []
         await view.slot_select.callback(late)
         assert ctx.db.ticked_keys(run["id"], 5) == [S1]             # nothing changed
-        assert "Signups for Sun 01 Nov closed" in late.text and "Nothing was changed" in late.text
+        assert "Signups for Sun 01 Nov closed" in late.text
         assert late.response.edits[-1]["view"] is view              # the menu stays open
 
         roles = player(5)                                           # roles and prog are not per day
-        await view.role_buttons[0].callback(roles)                  # the Tank toggle
-        assert ctx.db.get_player(5)["roles"] == "tank"
+        await pick_roles(view, roles, ["main_tank"])
+        assert ctx.db.get_player(5)["roles"] == "main_tank"
 
         view.day_select._values = ["2026-11-02"]
         await view.day_select.callback(player(5))
@@ -107,7 +102,7 @@ def test_closed_day_is_locked_but_other_days_still_save(ctx, make_run, clock):
 def test_menu_shows_each_days_cutoff_and_the_current_prog(ctx, make_run, clock):
     run = make_run(per_day=True)
     at(clock, "2026-11-01T12:00")
-    ctx.db.upsert_player(5, "Ann", roles=["tank"], prog_index=11, now=NOW)
+    ctx.db.upsert_player(5, "Ann", roles=["main_tank"], prog_index=11, now=NOW)
     ctx.db.set_day_availability(run["id"], 5, "2026-11-02", [S2])
 
     async def scenario():
@@ -115,10 +110,10 @@ def test_menu_shows_each_days_cutoff_and_the_current_prog(ctx, make_run, clock):
         await handlers.availability(ctx, it)
         msg = it.response.sent[0]
         text, view = msg["content"], msg["view"]
-        assert "Your prog right now: **11: P3 Gaols cleanup**" in text
-        assert "Editing **Mon 02 Nov**, signups close <t:" in text
+        assert "Prog: **11: P3 Gaols cleanup**" in text
+        assert re.search(r"Editing \*\*Mon 02 Nov\*\* \(closes <t:\d+:R>\)", text)
         assert "Sun 01 Nov: closed" in text
-        assert re.search(r"Mon 02 Nov: closes <t:\d+:R>", text) and re.search(r"Tue 03 Nov: closes <t:\d+:R>", text)
+        assert re.search(r"Mon 02 Nov: <t:\d+:R>", text) and re.search(r"Tue 03 Nov: <t:\d+:R>", text)
         desc = {o.value: o.description for o in view.day_select.options}
         assert desc == {"2026-11-01": "0 ticked · closed",
                         "2026-11-02": "1 ticked · closes Sun 23:59 EST",
@@ -129,7 +124,7 @@ def test_menu_shows_each_days_cutoff_and_the_current_prog(ctx, make_run, clock):
 def test_long_run_menu_message_stays_under_discords_limit(ctx, make_run, clock):
     run = make_run("Long", start=date(2026, 11, 1), end=date(2026, 11, 14), per_day=True)
     keys = [s["slot_key"] for s in ctx.db.run_slots(run["id"])]
-    ctx.db.upsert_player(5, "Ann", roles=["tank"], prog_index=18, now=NOW)
+    ctx.db.upsert_player(5, "Ann", roles=["main_tank"], prog_index=18, now=NOW)
     for day in sorted({k[:10] for k in keys}):
         ctx.db.set_day_availability(run["id"], 5, day, [k for k in keys if k[:10] == day])
 
@@ -268,50 +263,11 @@ def test_run_status_lists_each_days_state(ctx, make_run, clock):
 
 # ---------------------------------------------------------------- the old database
 
-def test_migration_gives_old_runs_one_row_per_day(tmp_path):
-    path = tmp_path / "old.sqlite3"
-    old = sqlite3.connect(path)
-    old.executescript(OLD_SCHEMA.read_text())                       # the schema as it was before run_days existed
-    assert old.execute("SELECT name FROM sqlite_master WHERE name = 'run_days'").fetchone() is None
-    old.execute("""INSERT INTO runs (id, guild_id, name, fight_id, start_date, end_date, signup_deadline_utc,
-                                     status, created_by, created_utc)
-                   VALUES (1, '100', 'Old run', 1, '2026-11-01', '2026-11-02', '2026-10-30T22:00:00+00:00',
-                           'closed', '1', '2026-10-20T00:00:00+00:00')""")
-    old.executemany("INSERT INTO slots (id, run_id, slot_key, start_utc, minutes) VALUES (?, 1, ?, ?, 90)",
-                    [(1, "2026-11-01T17:00", "2026-11-01T21:00:00+00:00"),
-                     (2, "2026-11-01T18:30", "2026-11-01T22:30:00+00:00"),
-                     (3, "2026-11-02T17:00", "2026-11-02T22:00:00+00:00")])
-    old.execute("INSERT INTO parties (id, run_id, slot_id, party_index, status, target_idx) VALUES (1, 1, 3, 0, 'draft', 0)")
-    old.execute("INSERT INTO party_members (party_id, discord_id, role) VALUES (1, '9', 'dps')")
-    old.commit()
-    old.close()
-
-    db = DB(str(path))
-    rows = {r["day"]: r for r in db.run_days(1)}
-    assert sorted(rows) == ["2026-11-01", "2026-11-02"]
-    assert {r["cutoff_utc"] for r in rows.values()} == {"2026-10-30T22:00:00+00:00"}     # the old deadline
-    assert rows["2026-11-01"]["exported_utc"] is None
-    assert rows["2026-11-02"]["exported_utc"] == "2026-10-20T00:00:00+00:00"            # it already had a draft
-    assert len(db.run_slots(1)) == 3 and len(db.parties(1)) == 1                         # nothing else changed
-
-    db.close()
-    again = DB(str(path))                                           # running the migration twice changes nothing
-    assert [r["day"] for r in again.run_days(1)] == ["2026-11-01", "2026-11-02"]
-    assert again.run_day(1, "2026-11-02")["exported_utc"] == "2026-10-20T00:00:00+00:00"
-
-    cfg = load_config(env={})
-    ctx = Ctx(db=again, cfg=cfg, grid=GridConfig.from_config(cfg), now=lambda: NOW)
-    run = again.run(1)
-    assert [day_state(ctx, run, r) for r in again.run_days(1)] == ["closed", "exported"]
-    new_id = again.create_run(guild_id=100, name="New run", fight_id=1, start_date=date(2026, 11, 8),
-                              end_date=date(2026, 11, 8), cutoffs={"2026-11-08": NOW}, slots=[], created_by=1, now=NOW)
-    assert [r["day"] for r in again.run_days(new_id)] == ["2026-11-08"]
-
 
 def test_every_select_and_modal_item_respects_discords_limits(ctx, make_run, clock):
     from bot.views import LimitsModal
     run = make_run("Long", start=date(2026, 11, 1), end=date(2026, 11, 14), per_day=True)
-    ctx.db.upsert_player(5, "Ann", roles=["tank"], prog_index=18, now=NOW)
+    ctx.db.upsert_player(5, "Ann", roles=["main_tank"], prog_index=18, now=NOW)
 
     async def scenario():
         it = player(5, "Ann")

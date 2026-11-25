@@ -1,7 +1,7 @@
 """Seed fake test players into the bot's database, so one person can test the whole flow alone.
 
-    uv run python -m bot.seed --run "test1"               # 7 fake players; you are the 8th and play dps
-    uv run python -m bot.seed --run "test1" --you tank    # you play tank, the fakes fill the other seats
+    uv run python -m bot.seed --run "test1"               # 7 fake players; you are the 8th and play melee
+    uv run python -m bot.seed --run "test1" --you main_tank    # you play main tank, the fakes fill the other seats
     uv run python -m bot.seed --remove                    # delete every fake player and all their rows
 
 The fakes get roles, a prog checkpoint and ticks on the run's slots (all of them, or just --slot KEY).
@@ -10,17 +10,18 @@ already has one is skipped. The fakes are not real Discord members, so in posted
 "unknown user" mentions. Their ids are 19-digit numbers above 9e18, which no real account can have.
 """
 import argparse
-import os
 import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
-from .config import ROLES, ROOT, load_config
+from psycopg.conninfo import conninfo_to_dict
+
+from .config import ROLES, ROLE_LABELS, load_config, role_label
 from .db import DB, parse_iso
 
 FAKE_BASE = 9_000_000_000_000_000_000   # a snowflake timestamp in 2083: never a real account
 FAKE_MAX = FAKE_BASE + 9_999
-LABEL = {"tank": "Tank", "healer": "Healer", "dps": "DPS"}
+LABEL = ROLE_LABELS
 ID_COLUMNS = ("discord_id", "voter_id", "target_id")
 
 
@@ -49,7 +50,7 @@ def fake_roles(party, you, count):
 
 
 def find_run(db, name, guild_id=None):
-    rows = db.conn.execute("SELECT * FROM runs WHERE name = ? COLLATE NOCASE", (name,)).fetchall()
+    rows = db.conn.execute("SELECT * FROM runs WHERE lower(name) = lower(?)", (name,)).fetchall()
     if guild_id is not None:
         rows = [r for r in rows if str(r["guild_id"]) == str(guild_id)]
     if not rows:
@@ -60,7 +61,7 @@ def find_run(db, name, guild_id=None):
     return rows[0]
 
 
-def seed(db, cfg, run, *, count=None, you="dps", prog=0, helpers=1, slots=None, now=None):
+def seed(db, cfg, run, *, count=None, you="melee", prog=0, helpers=1, slots=None, now=None):
     """Create or refresh the fake players for `run`. Returns a report dict; safe to run again."""
     now = now or datetime.now(timezone.utc)
     party = cfg["party"]
@@ -104,7 +105,7 @@ def seed(db, cfg, run, *, count=None, you="dps", prog=0, helpers=1, slots=None, 
     for i, role in enumerate(roles, start=1):
         seen[role] += 1
         fakes.append({"id": fake_id(i), "name": f"Test {LABEL[role]} {seen[role]}", "role": role, "helper": False})
-    for fake in fakes[len(fakes) - helpers:]:        # the last ones (mostly dps) are the helpers
+    for fake in fakes[len(fakes) - helpers:]:        # the last ones (mostly melee/caster) are the helpers
         fake["helper"] = True
 
     for fake in fakes:
@@ -128,22 +129,21 @@ def remove(db):
     if not ids:
         return report
     marks = ",".join("?" for _ in ids)
-    tables = [r["name"] for r in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")]
-    conn.commit()
-    conn.execute("PRAGMA foreign_keys = OFF")        # rows are removed from every table, in any order
-    try:
-        with conn:
-            for table in tables:
-                cols = [c["name"] for c in conn.execute(f'PRAGMA table_info("{table}")') if c["name"] in ID_COLUMNS]
-                if not cols:
-                    continue
-                where = " OR ".join(f'"{c}" IN ({marks})' for c in cols)
-                deleted = conn.execute(f'DELETE FROM "{table}" WHERE {where}', ids * len(cols)).rowcount
-                if deleted:
-                    report[table] = deleted
-    finally:
-        conn.execute("PRAGMA foreign_keys = ON")
+    by_table = {}
+    for r in conn.execute("SELECT table_name, column_name FROM information_schema.columns "
+                          "WHERE table_schema = current_schema() AND column_name = ANY(?) ORDER BY table_name",
+                          (list(ID_COLUMNS),)):
+        by_table.setdefault(r["table_name"], []).append(r["column_name"])
+    # `players` is the only parent among these tables (characters and prog scores hang off it and clean up
+    # after themselves), so it goes last and everything pointing at a fake player is gone by then.
+    order = sorted(t for t in by_table if t != "players") + (["players"] if "players" in by_table else [])
+    with conn:
+        for table in order:
+            cols = by_table[table]
+            where = " OR ".join(f'"{c}" IN ({marks})' for c in cols)
+            deleted = conn.execute(f'DELETE FROM "{table}" WHERE {where}', ids * len(cols)).rowcount
+            if deleted:
+                report[table] = deleted
     return report
 
 
@@ -153,7 +153,7 @@ def describe(report, run):
         lines.append(f"  {f['name']}: {f['role']}, prog {report['prog']} ({report['prog_name']})"
                      f"{', helper' if f['helper'] else ''}")
     lines.append(f"Ticked {report['slots_ticked']} slot(s) on {len(report['days'])} day(s).")
-    lines.append(f"You are the missing seat: in /availability pick {report['you']}, set prog to "
+    lines.append(f"You are the missing seat: in /availability open Roles and pick {role_label(report['you'])}, set prog to "
                  f"{report['prog_name']} and tick the same slot(s).")
     lines += [f"Warning: {w}" for w in report["warnings"]]
     lines.append("Run this again to reset them; `python -m bot.seed --remove` deletes them. "
@@ -161,12 +161,14 @@ def describe(report, run):
     return "\n".join(lines)
 
 
-def open_db(path_override=None):
+def open_db(url_override=None):
+    """(config, DB, a printable description of the database: its name and host, never the password)."""
     cfg = load_config()
-    path = path_override or cfg["db_path"]
-    if path != ":memory:" and not os.path.isabs(path):
-        path = str(ROOT / path)
-    return cfg, DB(path), path
+    url = url_override or cfg["database_url"]
+    if not url:
+        raise SeedError("No database: set DATABASE_URL in .env (or pass --database-url).")
+    info = conninfo_to_dict(url)
+    return cfg, DB(url), f"{info.get('dbname', '?')} on {info.get('host', 'localhost')}"
 
 
 def main(argv=None):
@@ -174,15 +176,15 @@ def main(argv=None):
     ap.add_argument("--run", help="name of an existing run to sign the fakes up for")
     ap.add_argument("--remove", action="store_true", help="delete all fake players and exit")
     ap.add_argument("--count", type=int, help="how many fakes (default: a full party minus you, 7)")
-    ap.add_argument("--you", default="dps", help="the role you will play yourself (default dps)")
+    ap.add_argument("--you", default="melee", help="the role you will play yourself (default melee)")
     ap.add_argument("--prog", type=int, default=0, help="checkpoint index for every fake (default 0, P1 fresh)")
     ap.add_argument("--helpers", type=int, default=1, help="how many fakes are helpers (default 1)")
     ap.add_argument("--slot", action="append", help="only tick this slot key (repeatable), e.g. 2026-11-02T17:00")
     ap.add_argument("--guild-id", help="needed only if the run name exists in several servers")
-    ap.add_argument("--db", help="database file (default: the bot's own)")
+    ap.add_argument("--database-url", help="Postgres URL (default: DATABASE_URL, the bot's own database)")
     args = ap.parse_args(argv)
     try:
-        cfg, db, path = open_db(args.db)
+        cfg, db, path = open_db(args.database_url)
         if args.remove:
             deleted = remove(db)
             print(f"Database: {path}")

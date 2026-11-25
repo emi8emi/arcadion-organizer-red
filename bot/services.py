@@ -6,12 +6,25 @@ from zoneinfo import ZoneInfo
 
 import discord
 
+from .config import role_label
 from .db import DB, parse_iso, split_roles
 from .grid import GridConfig
 from .characters import characters_line
 
 MAX_PER_DAY = 8
-MAX_PER_RUN = 40
+MAX_PER_RUN = 99
+
+
+def server_setting(ctx, guild_id, key):
+    """A server's own value (/settings), else the bot-wide default, but the default only for the home server
+    (GUILD_ID): another server's channels and role must never receive this one's, or the reverse."""
+    own = ctx.db.guild_setting(guild_id, key)
+    if own:
+        return own
+    home = ctx.cfg.get("home_guild_id")
+    if home is not None and guild_id is not None and str(home) == str(guild_id):
+        return ctx.cfg.get(key)
+    return None
 
 
 @dataclass
@@ -114,9 +127,15 @@ def validate_limits(per_day, per_run, drop, n_checkpoints):
 
 
 def checkpoint_label(checkpoints, idx):
+    """'9: P3 Gaols': the checkpoint number, its phase as P1, P2, ... and the point's name. Phases are numbered in
+    the order they first appear in the fight's checkpoint list, so the boss name is not shown."""
+    phases = []
+    for c in sorted(checkpoints, key=lambda c: c["idx"]):
+        if c["phase"] not in phases:
+            phases.append(c["phase"])
     for c in checkpoints:
         if c["idx"] == idx:
-            return f"{idx}: {c['phase']} {c['name']}"
+            return f"{idx}: P{phases.index(c['phase']) + 1} {c['name']}"
     return "not set"
 
 
@@ -132,7 +151,7 @@ def profile_text(ctx, run, discord_id):
     cps = ctx.db.checkpoints(run["fight_id"])
     roles = split_roles(player["roles"]) if player else []
     prog = player["prog_index"] if player else None
-    lines = [f"Roles: {', '.join(roles) if roles else 'not set'} · Prog: {checkpoint_label(cps, prog)}",
+    lines = [f"Roles: {', '.join(role_label(r) for r in roles) if roles else 'not set'} · Prog: {checkpoint_label(cps, prog)}",
              limits_text(ctx.db.get_limits(run["id"], discord_id, ctx.cfg))]
     lines.append(characters_line(ctx.db, discord_id))
     if not roles or prog is None:

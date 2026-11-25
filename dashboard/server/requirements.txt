@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+httpx
+itsdangerous
+python-dotenv
+psycopg[binary,pool]

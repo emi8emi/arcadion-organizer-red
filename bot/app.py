@@ -14,9 +14,12 @@ from .grid import GridConfig
 from .posting import post_rating_prompts
 from .reminders import send_due_reminders
 from .snapshots import take_due_snapshots
+from .panel import PanelButton
 from .views import RatePartyButton
 from .parties import auto_end_parties
 from .party_views import PartyEditButton, PartyEndedButton, WhySwappedButton
+from .confirm_views import CancelButton, ConfirmButton
+from .confirmations import send_confirmation_reminders
 from .services import Ctx
 from .lodestone import LodestoneClient
 
@@ -24,11 +27,13 @@ log = logging.getLogger("raidbot")
 
 
 def build_ctx(cfg):
-    path = cfg["db_path"]
-    path = path if path == ":memory:" or path.startswith("/") else str(ROOT / path)
+    url = cfg["database_url"]
+    if not url:
+        raise SystemExit("Set DATABASE_URL in .env, like postgresql://user:password@host:5432/raidbot "
+                         "(the dashboard migrates that database; see the README).")
     fflogs = (FFLogsClient(cfg["fflogs_client_id"], cfg["fflogs_client_secret"])
         if cfg.get("fflogs_client_id") and cfg.get("fflogs_client_secret") else None)
-    return Ctx(db=DB(path, ROOT / cfg.get("prog_points_dir", "prog_points")), cfg=cfg, grid=GridConfig.from_config(cfg),
+    return Ctx(db=DB(url, ROOT / cfg.get("prog_points_dir", "prog_points")), cfg=cfg, grid=GridConfig.from_config(cfg),
         lodestone=LodestoneClient(cfg["lodestone_region"]), fflogs=fflogs)
 
 
@@ -48,9 +53,14 @@ class RaidBot(discord.Client):
             await self.tree.sync(guild=guild)
         else:                                                     # global, can take up to an hour to appear
             await self.tree.sync()
-        if not self.ctx.cfg.get("reminder_channel_id"):
-            log.warning("No reminder_channel_id set: the bot will not remind organizers to run /draft export.")
-        self.add_dynamic_items(RatePartyButton, PartyEndedButton, PartyEditButton, WhySwappedButton)           # the thread buttons keep working after a restart
+        cfg = self.ctx.cfg
+        if cfg.get("home_guild_id") is None and any(cfg.get(k) for k in ("organizer_role_id", "reminder_channel_id",
+                                                                         "parties_channel_id")):
+            log.warning("ORGANIZER_ROLE_ID / REMINDER_CHANNEL_ID / PARTIES_CHANNEL_ID are set but GUILD_ID is not, so "
+                        "they belong to no server and are ignored. Set GUILD_ID (your home server) or configure "
+                        "each server with /settings.")
+        self.add_dynamic_items(RatePartyButton, PartyEndedButton, PartyEditButton, WhySwappedButton,
+                               ConfirmButton, CancelButton, PanelButton)           # the thread buttons keep working after a restart
         self.reminder_loop.start()
 
     async def _get_channel(self, channel_id):
@@ -73,6 +83,10 @@ class RaidBot(discord.Client):
             await post_rating_prompts(self.ctx)                                  # slots that just ended
         except Exception:
             log.exception("posting rating prompts failed")
+        try:
+            await send_confirmation_reminders(self.ctx)                          # unconfirmed players, slot starting soon
+        except Exception:
+            log.exception("confirmation reminders failed")
         try:
             await send_due_reminders(self.ctx, self._get_channel)
         except Exception:

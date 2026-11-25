@@ -1,11 +1,21 @@
-"""Shared fixtures: an in-memory bot context, a fixed clock, and fake Discord interactions."""
+"""Shared fixtures: a bot context on a private Postgres schema, a fixed clock, and fake Discord interactions.
+
+The tests need a PostgreSQL server (`docker compose up -d` starts one that matches the default URL). Set
+TEST_DATABASE_URL to use another. Each test gets its own schema in that database, with the dashboard's
+migrations applied, and the schema is dropped afterwards, so tests cannot see each other's data.
+"""
 import asyncio
+import importlib.util
+import itertools
+import os
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import psycopg
 import pytest
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -57,12 +67,22 @@ class FakeFollowup:
         self.sent.append({"content": content, **kwargs})
 
 
+class FakeUser(SimpleNamespace):
+    """A Discord member: `dms` collects what the bot sent them; dm_closed=True makes user.send fail like closed DMs."""
+
+    async def send(self, content=None, **kwargs):
+        if self.dm_closed:
+            raise RuntimeError("Cannot send messages to this user")
+        self.dms.append(content)
+
+
 class FakeInteraction:
-    def __init__(self, user_id=1, name="Tester", organizer=False, role_ids=(), guild_id=100):
+    def __init__(self, user_id=1, name="Tester", organizer=False, role_ids=(), guild_id=100, dm_closed=False):
         perms = SimpleNamespace(manage_guild=organizer, administrator=False)
         self.guild_id = guild_id
-        self.user = SimpleNamespace(id=user_id, display_name=name, guild_permissions=perms,
-                                    roles=[SimpleNamespace(id=r) for r in role_ids])
+        self.user = FakeUser(id=user_id, display_name=name, guild_permissions=perms,
+                             roles=[SimpleNamespace(id=r) for r in role_ids], dms=[], dm_closed=dm_closed,
+                             guild=SimpleNamespace(id=guild_id))
         self.response, self.followup = FakeResponse(), FakeFollowup()
 
     async def edit_original_response(self, **kwargs):
@@ -96,6 +116,88 @@ def player(user_id, name=None, **kw):
     return FakeInteraction(user_id=user_id, name=name or f"Player {user_id}", **kw)
 
 
+def _load_dashboard_migrate():
+    """The dashboard owns the schema and the bot never builds it, so tests borrow the dashboard's migration runner
+    (loaded by path: it is plain standard-library code, and importing `app` would drag in the dashboard's config)."""
+    path = Path(__file__).resolve().parent.parent / "dashboard" / "server" / "app" / "migrate.py"
+    spec = importlib.util.spec_from_file_location("dashboard_migrate", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+dashboard_migrate = _load_dashboard_migrate()
+
+
+def _test_database_url(root):
+    """TEST_DATABASE_URL, else the docker-compose database: POSTGRES_USER / POSTGRES_PASSWORD from the environment
+    or from a .env file (repo root or dashboard/server), host localhost, database `raidtest`."""
+    if os.environ.get("TEST_DATABASE_URL"):
+        return os.environ["TEST_DATABASE_URL"]
+    from dotenv import dotenv_values
+    env = {}
+    for path in (root / ".env", root / "dashboard" / "server" / ".env"):
+        env.update(dotenv_values(path))
+    user = os.environ.get("POSTGRES_USER") or env.get("POSTGRES_USER") or "postgres"
+    password = os.environ.get("POSTGRES_PASSWORD") or env.get("POSTGRES_PASSWORD") or "postgres"
+    return make_conninfo(host="localhost", port=5432, dbname="raidtest", user=user, password=password)
+
+
+def _connect_admin(url):
+    """Connect to the test database; the default `raidtest` is created on the spot if the server lacks it."""
+    try:
+        return psycopg.connect(url, autocommit=True, connect_timeout=5)
+    except psycopg.OperationalError as e:
+        if "does not exist" not in str(e) or conninfo_to_dict(url).get("dbname") != "raidtest":
+            raise
+    with psycopg.connect(make_conninfo(url, dbname="postgres"), autocommit=True, connect_timeout=5) as server:
+        server.execute("CREATE DATABASE raidtest")
+    return psycopg.connect(url, autocommit=True, connect_timeout=5)
+
+
+TEST_DATABASE_URL = _test_database_url(Path(__file__).resolve().parent.parent)
+_schema_ids = itertools.count(1)
+
+
+@pytest.fixture(scope="session")
+def pg_admin():
+    try:
+        conn = _connect_admin(TEST_DATABASE_URL)
+    except psycopg.Error as e:
+        pytest.exit(f"Cannot reach the test database ({e}).\nStart one with `docker compose -f "
+                    f"dashboard/server/docker-compose.yml up -d`, or point TEST_DATABASE_URL at any empty "
+                    f"PostgreSQL database.", returncode=2)
+    yield conn
+    conn.close()
+
+
+def scratch_schema(pg_admin, migrated=True):
+    """Make a new empty schema and return (connection string that uses only it, its name)."""
+    name = f"t{os.getpid()}_{next(_schema_ids)}"
+    pg_admin.execute(f'CREATE SCHEMA "{name}"')
+    url = make_conninfo(TEST_DATABASE_URL, options=f"-c search_path={name}")
+    if migrated:
+        with psycopg.connect(url, autocommit=True) as conn:
+            dashboard_migrate.apply_migrations(conn)
+    return url, name
+
+
+@pytest.fixture
+def unmigrated_url(pg_admin):
+    """A private schema with nothing in it: what a database nobody has migrated looks like."""
+    url, name = scratch_schema(pg_admin, migrated=False)
+    yield url
+    pg_admin.execute(f'DROP SCHEMA "{name}" CASCADE')
+
+
+@pytest.fixture
+def db_url(pg_admin):
+    """Connection string for a private, migrated schema. Open it as many times as you like (a 'restart')."""
+    url, name = scratch_schema(pg_admin)
+    yield url
+    pg_admin.execute(f'DROP SCHEMA "{name}" CASCADE')
+
+
 @pytest.fixture(autouse=True)
 def test_prog_points(monkeypatch):
     """Every DB the tests open builds its fights from a small fixed UWU file (the 19 old checkpoints plus the
@@ -105,9 +207,10 @@ def test_prog_points(monkeypatch):
 
 
 @pytest.fixture
-def cfg(tmp_path):
+def cfg(tmp_path, db_url):
     c = load_config(env={})
-    c["db_path"] = ":memory:"
+    c["database_url"] = db_url
+    c["home_guild_id"] = 100                     # the guild every test run belongs to: the .env defaults apply to it
     c["export_dir"] = str(tmp_path / "exports")
     return c
 
@@ -119,7 +222,9 @@ def clock():
 
 @pytest.fixture
 def ctx(cfg, clock):
-    return Ctx(db=DB(":memory:"), cfg=cfg, grid=GridConfig.from_config(cfg), now=lambda: clock["now"])
+    db = DB(cfg["database_url"])
+    yield Ctx(db=db, cfg=cfg, grid=GridConfig.from_config(cfg), now=lambda: clock["now"])
+    db.close()
 
 
 def evening_before_cutoffs(slots, cfg, days_before=1):
@@ -163,8 +268,8 @@ def add_player(ctx, run, uid, roles, prog, keys, name=None, per_day=2, per_run=4
 
 
 def fill_one_party(ctx, run, slot_key="2026-11-02T17:00", first_id=1, prog=0):
-    """Eight players (2 tank, 2 healer, 4 dps) who all ticked the same slot."""
-    roles = ["tank"] * 2 + ["healer"] * 2 + ["dps"] * 4
+    """Eight players (the seven-role party) who all ticked the same slot."""
+    roles = ["main_tank", "off_tank", "regen", "shield", "melee", "melee", "ranged", "caster"]
     for i, r in enumerate(roles):
         add_player(ctx, run, first_id + i, [r], prog, [slot_key])
     return list(range(first_id, first_id + 8))
@@ -176,7 +281,7 @@ SLOT = "2026-11-02T17:00"
 def draft_for(ctx, run, ids, **overrides):
     """A hand-made solver draft for the current signups: one party, ids in role order."""
     data, _ = build_signups(ctx.db, run, ctx.cfg)
-    roles = ["tank"] * 2 + ["healer"] * 2 + ["dps"] * 4
+    roles = ["main_tank", "off_tank", "regen", "shield", "melee", "melee", "ranged", "caster"]
     draft = {"version": 1, "input_fingerprint": fingerprint(data),
              "parties": [{"slot": SLOT, "party": 0, "target": {"index": 0, "name": "P1 Fresh"},
                           "members": [{"player": i, "role": r, "helper": False, "placed_down": False, "distance": 0}
@@ -192,7 +297,7 @@ def draft_for(ctx, run, ids, **overrides):
 S1 = "2026-11-01T17:00"      # Sun 1 Nov (the day clocks fall back)
 S2 = SLOT                    # Mon 2 Nov
 S3 = "2026-11-03T17:00"      # Tue 3 Nov
-ROLES_8 = ["tank"] * 2 + ["healer"] * 2 + ["dps"] * 4
+ROLES_8 = ["main_tank", "off_tank", "regen", "shield", "melee", "melee", "ranged", "caster"]
 
 
 def add_party_players(ctx, run, keys, first_id=1, **kw):
@@ -224,3 +329,11 @@ def confirm(ctx, run, day=None):
     """What /draft approve does to the database: the draft parties (of one day, or all) become confirmed."""
     days = [day] if day else sorted({s["slot_key"][:10] for s in ctx.db.run_slots(run["id"])})
     return sum(ctx.db.confirm_day(run["id"], d) for d in days)
+
+
+async def pick_roles(view, interaction, roles):
+    """Do what a player does in the Roles modal: choose these roles and submit."""
+    from bot.views import RolesModal
+    modal = RolesModal(view)
+    modal.select._values = list(roles)
+    await modal.on_submit(interaction)

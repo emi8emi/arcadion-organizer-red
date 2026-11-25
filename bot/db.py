@@ -1,19 +1,44 @@
-"""SQLite access. Plain sqlite3 (synchronous): fine for a 20-60 person community bot.
+"""Database access. Plain synchronous psycopg: fine for a 20-60 person community bot.
 
 Every method that changes data commits before returning. Times are UTC ISO strings.
+
+The database is PostgreSQL, reached through bot/pg.py (queries are written with `?` placeholders there).
+The bot does not own the schema: the dashboard does (dashboard/server/app/migrations/). Opening a `DB`
+only checks that the database has been migrated far enough, and refuses to start otherwise.
 """
 import json
-import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .config import ROLES
+import psycopg.errors
 
-SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schema.sql"
+from .config import ROLES
+from .pg import Conn
+
 PROG_POINTS_DIR = Path(__file__).resolve().parent.parent / "prog_points"
 
+# The newest dashboard migration this code depends on. Raise it in the same change that starts using a
+# new table or column; a database that is further along is fine (migrations only add things).
+REQUIRED_SCHEMA_VERSION = 5
 
-GUILD_SETTING_KEYS = ("organizer_role_id", "reminder_channel_id", "parties_channel_id")
+
+GUILD_SETTING_KEYS = ("organizer_role_id", "reminder_channel_id", "parties_channel_id",
+                      "user_panel_channel_id", "user_panel_message_id")
+
+
+class SchemaNotReady(RuntimeError):
+    """The database has not been migrated to the version this bot needs."""
+
+
+def check_schema(conn, where="the database"):
+    have = 0
+    if conn.execute("SELECT to_regclass('schema_migrations')").fetchone()[0] is not None:
+        have = conn.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()[0]
+    if have < REQUIRED_SCHEMA_VERSION:
+        raise SchemaNotReady(
+            f"{where} is at schema version {have} but this bot needs {REQUIRED_SCHEMA_VERSION}. The dashboard owns "
+            f"the schema: start the dashboard (it migrates on startup), or run `python -m app.migrate` in "
+            f"dashboard/server, then start the bot again.")
 
 
 class DuplicateRun(Exception):
@@ -47,68 +72,15 @@ def _member_dict(m):
 
 
 class DB:
-    def __init__(self, path=":memory:", prog_dir=None):
-        self.conn = sqlite3.connect(path, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA foreign_keys = ON")
-        self._park_old_votes()
-        self.conn.executescript(SCHEMA_PATH.read_text())
-        self._migrate()
-        self.conn.commit()
+    def __init__(self, url, prog_dir=None):
+        self.conn = Conn(url)
+        try:
+            check_schema(self.conn, "the database")
+        except Exception:
+            self.conn.close()
+            raise
         from .progscore import sync_fights               # fights + checkpoints come from the prog point files
         sync_fights(self, prog_dir or PROG_POINTS_DIR)
-
-    def _park_old_votes(self):
-        """Early skeletons had an unused `votes` table (yes/neutral/no, one row per slot and pair).
-        Move it aside so schema.sql can create the append-only table; _migrate copies any rows across."""
-        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(votes)")}
-        if cols and "vote" not in cols:
-            with self.conn:
-                self.conn.execute("ALTER TABLE votes RENAME TO votes_old")
-
-    def _migrate(self):
-        """Bring a database made before per-day cutoffs up to date. Safe to run on every start.
-
-        Runs without run_days rows get one row per day (taken from their slots) using the run's old
-        signup_deadline_utc as every day's cutoff. A day that already has parties in the database counts
-        as exported, so old runs do not trigger export reminders.
-        """
-        if self.conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'votes_old'").fetchone():
-            with self.conn:                               # yes -> like, no -> dislike
-                self.conn.execute(
-                    """INSERT INTO votes (id, run_id, slot_id, voter_id, target_id, vote, created_utc)
-                       SELECT o.id, s.run_id, o.slot_id, o.voter_id, o.target_id,
-                              CASE o.answer WHEN 'yes' THEN 'like' WHEN 'no' THEN 'dislike' ELSE 'neutral' END,
-                              o.created_utc FROM votes_old o JOIN slots s ON s.id = o.slot_id""")
-                self.conn.execute("DROP TABLE votes_old")
-        from .characters import ensure_schema          # characters tables, and the move off the soft-link version
-        ensure_schema(self.conn)
-        from .progscore import ensure_schema as ensure_prog_schema
-        ensure_prog_schema(self.conn)
-        with self.conn:
-            self.conn.execute(
-                """CREATE TABLE IF NOT EXISTS guild_settings (
-                       guild_id TEXT PRIMARY KEY, organizer_role_id TEXT,
-                       reminder_channel_id TEXT, parties_channel_id TEXT)""")
-            for table, col, ddl in (("run_days", "snapshot_utc", "TEXT"),
-                                    ("run_days", "snapshot_late", "INTEGER NOT NULL DEFAULT 0"),
-                                    ("day_snapshots", "character_id", "INTEGER REFERENCES characters(id) ON DELETE SET NULL"),
-                                    ("slots", "thread_id", "TEXT"), ("slots", "rating_posted_utc", "TEXT"),
-                                    ("parties", "message_id", "TEXT"), ("parties", "ended_utc", "TEXT"),
-                                    ("parties", "ended_by", "TEXT"), ("parties", "rating_posted_utc", "TEXT")):
-                cols = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
-                if col not in cols:                       # database made before this column existed
-                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
-            self.conn.execute(
-                """INSERT OR IGNORE INTO run_days (run_id, day, cutoff_utc, exported_utc)
-                   SELECT r.id, substr(s.slot_key, 1, 10), r.signup_deadline_utc,
-                          CASE WHEN EXISTS (SELECT 1 FROM parties p JOIN slots ps ON ps.id = p.slot_id
-                                            WHERE p.run_id = r.id
-                                              AND substr(ps.slot_key, 1, 10) = substr(s.slot_key, 1, 10))
-                               THEN r.created_utc END
-                   FROM runs r JOIN slots s ON s.run_id = r.id
-                   WHERE r.id NOT IN (SELECT run_id FROM run_days)
-                   GROUP BY r.id, substr(s.slot_key, 1, 10)""")
 
     def close(self):
         self.conn.close()
@@ -144,21 +116,20 @@ class DB:
         legacy_deadline = max(cutoffs.values())            # only kept so old code and old databases still make sense
         try:
             with self.conn:
-                cur = self.conn.execute(
+                run_id = self.conn.execute(
                     """INSERT INTO runs (guild_id, name, fight_id, start_date, end_date, earliest_start,
                                          latest_start, signup_deadline_utc, status, created_by, created_utc)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?) RETURNING id""",
                     (str(guild_id), name, fight_id, str(start_date), str(end_date), earliest, latest,
-                     iso(legacy_deadline), str(created_by), iso(now)))
-                run_id = cur.lastrowid
+                     iso(legacy_deadline), str(created_by), iso(now))).fetchone()["id"]
                 self.conn.executemany(
                     "INSERT INTO slots (run_id, slot_key, start_utc, minutes) VALUES (?, ?, ?, ?)",
                     [(run_id, s.key, iso(s.start_utc), s.minutes) for s in slots])
                 self.conn.executemany(
                     "INSERT INTO run_days (run_id, day, cutoff_utc) VALUES (?, ?, ?)",
                     [(run_id, day, iso(cutoff)) for day, cutoff in sorted(cutoffs.items())])
-        except sqlite3.IntegrityError as e:
-            if "runs.guild_id" in str(e) or "UNIQUE" in str(e):
+        except psycopg.errors.UniqueViolation as e:
+            if e.diag.constraint_name == "runs_guild_name_key":
                 raise DuplicateRun(name) from e
             raise
         return run_id
@@ -295,7 +266,7 @@ class DB:
                     "SELECT id FROM slots WHERE run_id = ? AND slot_key = ?", (run_id, key)).fetchone()
                 if row:
                     self.conn.execute(
-                        "INSERT OR IGNORE INTO availability (run_id, discord_id, slot_id) VALUES (?, ?, ?)",
+                        "INSERT INTO availability (run_id, discord_id, slot_id) VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
                         (run_id, did, row["id"]))
 
     def tick_rows(self, run_id, snapshots=True):
@@ -433,8 +404,9 @@ class DB:
     def grant_helper(self, fight_id, discord_id, granted_by, now):
         with self.conn:
             self.conn.execute(
-                "INSERT OR REPLACE INTO helper_grants (fight_id, discord_id, granted_by, granted_utc) "
-                "VALUES (?, ?, ?, ?)", (fight_id, str(discord_id), str(granted_by), iso(now)))
+                "INSERT INTO helper_grants (fight_id, discord_id, granted_by, granted_utc) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (fight_id, discord_id) DO UPDATE SET granted_by = excluded.granted_by, "
+                "granted_utc = excluded.granted_utc", (fight_id, str(discord_id), str(granted_by), iso(now)))
 
     def revoke_helper(self, fight_id, discord_id):
         with self.conn:
@@ -514,16 +486,18 @@ class DB:
             else:
                 self.conn.execute("DELETE FROM draft_notes WHERE run_id = ?", (run_id,))
             for pa in parties:
-                cur = self.conn.execute(
-                    "INSERT INTO parties (run_id, slot_id, party_index, status, target_idx) VALUES (?, ?, ?, 'draft', ?)",
-                    (run_id, slot_ids[pa["slot_key"]], pa["party_index"], pa["target_idx"]))
+                party_id = self.conn.execute(
+                    "INSERT INTO parties (run_id, slot_id, party_index, status, target_idx) "
+                    "VALUES (?, ?, ?, 'draft', ?) RETURNING id",
+                    (run_id, slot_ids[pa["slot_key"]], pa["party_index"], pa["target_idx"])).fetchone()["id"]
                 self.conn.executemany(
                     """INSERT INTO party_members (party_id, discord_id, role, is_helper, placed_down, distance)
                        VALUES (?, ?, ?, ?, ?, ?)""",
-                    [(cur.lastrowid, m["discord_id"], m["role"], int(m["helper"]), int(m["placed_down"]),
+                    [(party_id, m["discord_id"], m["role"], int(m["helper"]), int(m["placed_down"]),
                       int(m["distance"])) for m in pa["members"]])
             self.conn.executemany(
-                "INSERT OR REPLACE INTO draft_notes (run_id, kind, ref, text) VALUES (?, ?, ?, ?)",
+                "INSERT INTO draft_notes (run_id, kind, ref, text) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (run_id, kind, ref) DO UPDATE SET text = excluded.text",
                 [(run_id, kind, ref, text) for kind, ref, text in notes])
 
     def parties(self, run_id):
@@ -552,7 +526,8 @@ class DB:
     def day_party_counts(self, run_id, day):
         """(draft parties, approved parties) on one day."""
         row = self.conn.execute(
-            """SELECT COALESCE(SUM(p.status = 'draft'), 0) AS d, COALESCE(SUM(p.status != 'draft'), 0) AS c
+            """SELECT COUNT(*) FILTER (WHERE p.status = 'draft') AS d,
+                      COUNT(*) FILTER (WHERE p.status != 'draft') AS c
                FROM parties p JOIN slots s ON s.id = p.slot_id
                WHERE p.run_id = ? AND substr(s.slot_key, 1, 10) = ?""", (run_id, day)).fetchone()
         return row["d"], row["c"]
@@ -573,8 +548,8 @@ class DB:
                 (run_id, run_id, day)).fetchall()
             for p in drafts:                       # freeze the solver's version before anyone edits it
                 self.conn.execute(
-                    """INSERT OR IGNORE INTO party_originals (party_id, run_id, slot_id, taken_utc, target_idx, members_json)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    """INSERT INTO party_originals (party_id, run_id, slot_id, taken_utc, target_idx, members_json)
+                       VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (party_id) DO NOTHING""",
                     (p["id"], run_id, p["slot_id"], iso(datetime.now(timezone.utc)), p["target_idx"],
                      json.dumps([_member_dict(m) for m in self.party_members(p["id"])])))
             cur = self.conn.execute(
@@ -623,9 +598,72 @@ class DB:
         if key not in GUILD_SETTING_KEYS:
             raise KeyError(key)
         with self.conn:
-            self.conn.execute("INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)", (str(guild_id),))
+            self.conn.execute("INSERT INTO guild_settings (guild_id) VALUES (?) ON CONFLICT DO NOTHING", (str(guild_id),))
             self.conn.execute(f"UPDATE guild_settings SET {key} = ? WHERE guild_id = ?",
                               (None if value is None else str(value), str(guild_id)))
+
+    # ------------------------------------------------------------ party ratings and feedback
+
+    def add_party_rating(self, party, voter_id, vote, now):
+        """Append a rating (like / dislike) for a whole party; the latest per (voter, party) is current."""
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO party_ratings (run_id, slot_id, party_id, voter_id, vote, created_utc) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (party["run_id"], party["slot_id"], party["id"], str(voter_id), vote, iso(now)))
+
+    def party_rating(self, party_id, voter_id):
+        row = self.conn.execute(
+            "SELECT vote FROM party_ratings WHERE party_id = ? AND voter_id = ? ORDER BY created_utc DESC, id DESC LIMIT 1",
+            (party_id, str(voter_id))).fetchone()
+        return row["vote"] if row else None
+
+    def latest_party_ratings(self, as_of, since=None):
+        """Every voter's current rating of each party as of `as_of` (latest row at or before it)."""
+        rows = self.conn.execute(
+            """SELECT r.* FROM party_ratings r
+               WHERE r.created_utc <= ? AND r.id = (
+                   SELECT r2.id FROM party_ratings r2 WHERE r2.voter_id = r.voter_id AND r2.party_id = r.party_id
+                     AND r2.created_utc <= ? ORDER BY r2.created_utc DESC, r2.id DESC LIMIT 1)
+               ORDER BY r.voter_id, r.party_id""", (iso(as_of), iso(as_of))).fetchall()
+        return [r for r in rows if since is None or r["created_utc"] >= iso(since)]
+
+    def party_member_ids(self, party_ids):
+        """{party_id: [discord ids]} for these parties."""
+        party_ids = list(party_ids)
+        if not party_ids:
+            return {}
+        marks = ",".join("?" for _ in party_ids)
+        out = {}
+        for r in self.conn.execute(f"SELECT party_id, discord_id FROM party_members WHERE party_id IN ({marks}) "
+                                   "ORDER BY party_id, discord_id", party_ids).fetchall():
+            out.setdefault(r["party_id"], []).append(r["discord_id"])
+        return out
+
+    def replace_party_feedback(self, party, reporter_id, category, rows, now):
+        """Replace this reporter's feedback of one category for the party (other categories stay).
+        `rows`: [(target_id or None, note)]."""
+        with self.conn:
+            self.conn.execute("DELETE FROM party_feedback WHERE party_id = ? AND reporter_id = ? AND category = ?",
+                              (party["id"], str(reporter_id), category))
+            for target, note in rows:
+                self.conn.execute(
+                    "INSERT INTO party_feedback (run_id, slot_id, party_id, reporter_id, target_id, category, note, "
+                    "created_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (party["run_id"], party["slot_id"], party["id"], str(reporter_id),
+                     None if target is None else str(target), category, note, iso(now)))
+
+    def party_feedback_by(self, party_id, reporter_id):
+        return self.conn.execute("SELECT * FROM party_feedback WHERE party_id = ? AND reporter_id = ? ORDER BY id",
+                                 (party_id, str(reporter_id))).fetchall()
+
+    def feedback_rows(self, as_of, since=None):
+        """Feedback created in (since, as_of], joined with the party's slot, oldest first."""
+        rows = self.conn.execute(
+            """SELECT f.*, s.slot_key, p.party_index FROM party_feedback f
+               JOIN parties p ON p.id = f.party_id JOIN slots s ON s.id = f.slot_id
+               WHERE f.created_utc <= ? ORDER BY f.created_utc, f.id""", (iso(as_of),)).fetchall()
+        return [r for r in rows if since is None or r["created_utc"] >= iso(since)]
 
     def move_slot_start(self, slot_id, start_utc):
         """Debug only: move a slot's start (used by /debug complete to make a slot count as ended)."""
@@ -659,15 +697,14 @@ class DB:
     def log_change(self, party, actor_id, kind, now, *, player_id=None, other_player_id=None, reason_code=None,
                    reason_text=None, warnings=None, detail=None):
         """Append one row to party_changes (call inside `with self.conn`). Returns its id."""
-        cur = self.conn.execute(
+        return self.conn.execute(
             """INSERT INTO party_changes (party_id, run_id, slot_id, at_utc, actor_id, kind, player_id,
                                           other_player_id, reason_code, reason_text, warnings_json, detail_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id""",
             (party["id"], party["run_id"], party["slot_id"], iso(now), str(actor_id), kind,
              None if player_id is None else str(player_id), None if other_player_id is None else str(other_player_id),
              reason_code, reason_text, json.dumps(warnings) if warnings else None,
-             json.dumps(detail) if detail else None))
-        return cur.lastrowid
+             json.dumps(detail) if detail else None)).fetchone()["id"]
 
     def party_changes(self, party_id):
         return self.conn.execute("SELECT * FROM party_changes WHERE party_id = ? ORDER BY id", (party_id,)).fetchall()
@@ -691,7 +728,8 @@ class DB:
             self.conn.execute("UPDATE parties SET status = 'done', ended_utc = ?, ended_by = ? WHERE id = ?",
                               (iso(now), str(by), party_id))
             self.conn.executemany(
-                "INSERT OR REPLACE INTO play_log (slot_id, discord_id, minutes) VALUES (?, ?, ?)",
+                "INSERT INTO play_log (slot_id, discord_id, minutes) VALUES (?, ?, ?) "
+                "ON CONFLICT (slot_id, discord_id) DO UPDATE SET minutes = excluded.minutes",
                 [(party["slot_id"], m["discord_id"], minutes) for m in self.party_members(party_id)])
             if by != "auto":
                 self.log_change(party, actor_id or by, "end_override" if override else "ended", now,
@@ -755,13 +793,17 @@ class DB:
                 "INSERT INTO party_members (party_id, discord_id, role, is_helper, placed_down, distance) "
                 "VALUES (?, ?, ?, ?, 0, 0)", (party_id, in_id, in_role, int(is_helper)))
             self.conn.execute("DELETE FROM standby WHERE slot_id = ? AND discord_id = ?", (party["slot_id"], in_id))
-            self.conn.execute("INSERT OR IGNORE INTO standby (slot_id, discord_id) VALUES (?, ?)",
+            self.conn.execute("INSERT INTO standby (slot_id, discord_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
                               (party["slot_id"], out_id))
             self.conn.execute("DELETE FROM play_log WHERE slot_id = ? AND discord_id = ?", (party["slot_id"], out_id))
             self.conn.execute("DELETE FROM votes WHERE slot_id = ? AND (voter_id = ? OR target_id = ?)",
                               (party["slot_id"], out_id, out_id))
+            self.conn.execute("DELETE FROM party_ratings WHERE party_id = ? AND voter_id = ?", (party_id, out_id))
+            self.conn.execute("DELETE FROM party_feedback WHERE party_id = ? AND (reporter_id = ? OR target_id = ?)",
+                              (party_id, out_id, out_id))
             if party["ended_utc"] and minutes is not None:
-                self.conn.execute("INSERT OR REPLACE INTO play_log (slot_id, discord_id, minutes) VALUES (?, ?, ?)",
+                self.conn.execute("INSERT INTO play_log (slot_id, discord_id, minutes) VALUES (?, ?, ?) "
+                                  "ON CONFLICT (slot_id, discord_id) DO UPDATE SET minutes = excluded.minutes",
                                   (party["slot_id"], in_id, minutes))
             return self.log_change(party, actor_id, "swap", now, player_id=out_id, other_player_id=in_id,
                                    reason_code=reason_code, reason_text=reason_text, warnings=warnings,

@@ -4,7 +4,9 @@ from datetime import timedelta
 import discord
 
 from bot import handlers
-from conftest import NOW, player, run_async
+from bot.config import ROLES
+from bot.views import RolesModal
+from conftest import NOW, pick_roles, player, run_async
 
 
 async def open_menu(ctx, uid=5):
@@ -27,28 +29,29 @@ def test_the_menu_fits_discords_five_rows(ctx, make_run):
     rows = {}
     for c in view.children:
         rows.setdefault(c.row, []).append(c)
-    assert sorted(rows) == [0, 1, 2, 3, 4] and len(rows[0]) == 5
-    assert all(len(rows[i]) == 1 for i in (1, 2, 3, 4))
+    assert sorted(rows) == [0, 1, 2, 3, 4]
+    assert all(len(rows[i]) == 1 for i in (0, 1, 2, 3))             # the four dropdowns, one per row
+    assert [type(c).__name__ for c in rows[4]] == ["RolesButton", "LimitsButton", "DoneButton"]
     view.to_components()                                   # Discord's own layout check
 
 
-def test_role_buttons_toggle_and_keep_one_on(ctx, make_run):
+def test_roles_modal_saves_every_pick_and_keeps_one_on(ctx, make_run):
     make_run()
 
     async def scenario():
         it = player(5)
         await handlers.availability(ctx, it)
         view = it.response.sent[0]["view"]
-        tank, healer, dps = view.role_buttons
-        for b in (dps, tank):
-            await b.callback(player(5))
-        assert ctx.db.get_player(5)["roles"] == "tank,dps"
-        assert [b.style for b in view.role_buttons] == [discord.ButtonStyle.success, discord.ButtonStyle.secondary,
-                                                        discord.ButtonStyle.success]
-        await tank.callback(player(5))
+        await pick_roles(view, player(5), ["caster", "main_tank", "regen"])
+        assert ctx.db.get_player(5)["roles"] == "main_tank,regen,caster"          # fixed role order
+        assert view.roles_button.label == "Roles (3)"
+        modal = RolesModal(view)                                  # reopened: the saved roles are preselected
+        assert [o.value for o in modal.select.options if o.default] == ["main_tank", "regen", "caster"]
+        assert [o.value for o in modal.select.options] == list(ROLES)
         last = player(5)
-        await dps.callback(last)                           # the last role cannot be switched off
-        assert ctx.db.get_player(5)["roles"] == "dps" and "at least one role" in last.text
+        modal.select._values = []                                  # the last role cannot be switched off
+        await modal.on_submit(last)
+        assert ctx.db.get_player(5)["roles"] == "main_tank,regen,caster" and "at least one role" in last.text.lower()
     run_async(scenario())
 
 
@@ -67,7 +70,7 @@ def test_dropdown_saves_the_character_per_day(ctx, make_run):
         d1, d2 = view.days[0], view.days[1]
         assert view.day == d1
         assert [o.label for o in view.character_select.options] == ["Ann Tank @ Exodus", "Ann Alt @ Exodus"]
-        assert not any(o.default for o in view.character_select.options) and "Pick which character" in view.render()
+        assert not any(o.default for o in view.character_select.options) and "Char: Not set for" in view.render()
         view.character_select._values = [str(a)]
         await view.character_select.callback(player(5))
         assert ctx.db.chosen_character(run["id"], d1, 5)["id"] == a
@@ -92,7 +95,7 @@ def test_one_character_is_preselected_and_someone_elses_is_refused(ctx, make_run
         view.character_select._values = [str(other)]
         it = player(5)
         await view.character_select.callback(it)
-        assert "not one of your verified" in it.text
+        assert "Invalid character" in it.text
         assert ctx.db.chosen_character(run["id"], view.day, 5)["id"] == mine
     run_async(scenario())
 
@@ -105,4 +108,4 @@ def test_a_closed_day_locks_the_dropdown(ctx, make_run, clock):
     assert not view.character_select.disabled
     clock["now"] = NOW + timedelta(days=10)
     view.sync()
-    assert view.character_select.disabled and "closed" in view.character_select.placeholder
+    assert view.character_select.disabled and "locked" in view.character_select.placeholder
