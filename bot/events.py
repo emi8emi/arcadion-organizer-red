@@ -11,7 +11,10 @@ Spec (version 1), all times are wall-clock in the bot's grid timezone unless `cu
     {
       "version": 1,
       "name": "UWU week 1",                       # 1-60 characters, unique per server (case-insensitive)
-      "content": "Ultima Weapon (Ultimate)",       # a fight the bot knows
+      "content": "Ultima Weapon (Ultimate)",       # a fight the bot knows (optional when mode is "availability")
+      "mode": "roles",                             # "roles" (default): seven-role parties; "availability": only
+      "party_size": 8,                             #   collect who can make which slot (like when2meet), looking for
+                                                   #   groups of party_size (1-100, availability only)
       "first_start": "17:00",                      # defaults for every day: first and last slot start, slot length
       "last_start": "20:00",
       "slot_minutes": 90,
@@ -26,6 +29,10 @@ Spec (version 1), all times are wall-clock in the bot's grid timezone unless `cu
                    "open_at": "2026-11-01 12:00"}   # every part optional; open_at opens the event by itself
     }
 
+In "availability" mode players only tick slots: no roles, prog or limits, no solver, no parties. `/run status`
+shows how many people ticked each slot and how many groups of `party_size` that makes. Custom role lists are not
+supported yet.
+
 Slot starts of a day are first_start, first_start + slot_minutes, ... up to and including last_start. Every
 field except name, content and days is optional (defaults come from config.json).
 """
@@ -36,7 +43,9 @@ from zoneinfo import ZoneInfo, available_timezones
 from .grid import GridConfig, day_cutoff, day_slots, parse_hm
 
 SPEC_VERSION = 1
-TOP_KEYS = {"version", "name", "content", "first_start", "last_start", "slot_minutes", "cutoff", "cutoff_timezone",
+MODES = ("roles", "availability")
+MAX_PARTY_SIZE = 100
+TOP_KEYS = {"version", "name", "content", "mode", "party_size", "first_start", "last_start", "slot_minutes", "cutoff", "cutoff_timezone",
             "days", "announce"}
 DAY_KEYS = {"date", "first_start", "last_start", "slot_minutes", "cutoff_at"}
 CUTOFF_KEYS = {"time", "days_before"}
@@ -61,6 +70,8 @@ class Plan:
     name: str
     fight: object
     cutoff_tz: str
+    mode: str = "roles"
+    party_size: int = None
     days: list = field(default_factory=list)
     open_at_utc: datetime = None
     announce: dict = field(default_factory=dict)
@@ -161,9 +172,30 @@ def resolve(spec, cfg, grid, db, now):
     if not name or len(name) > 60:
         err("Give the event a name of 1 to 60 characters.")
 
+    mode = spec.get("mode", "roles")
+    if mode not in MODES:
+        err(f"mode must be one of: {', '.join(MODES)}.")
+        mode = "roles"
+    party_size = spec.get("party_size")
+    if mode == "roles":
+        if party_size is not None:
+            err("party_size only applies to availability events; a role party's size comes from the party "
+                "composition in config.json.")
+    elif party_size is None:
+        party_size = 8
+    if party_size is not None and mode == "availability" and (
+            isinstance(party_size, bool) or not isinstance(party_size, int) or not 1 <= party_size <= MAX_PARTY_SIZE):
+        err(f"party_size must be a whole number from 1 to {MAX_PARTY_SIZE}.")
+        party_size = None
+
     content = spec.get("content")
     fight = db.find_fight(content) if isinstance(content, str) and content.strip() else None
-    if fight is None:
+    if fight is None and mode == "availability" and not content:
+        fights = db.fights()                       # no fight is needed; runs keep a placeholder so old code works
+        fight = fights[0] if fights else None
+        if fight is None:
+            err("No fights are known to the bot yet.")
+    elif fight is None:
         known = ", ".join(f["name"] for f in db.fights())
         err(f"I don't know the content '{content}'. Known: {known}." if content else "Pick the fight (content).")
 
@@ -261,18 +293,27 @@ def resolve(spec, cfg, grid, db, now):
     if errors:
         return None, errors
     days.sort(key=lambda d: d.day)
-    canonical = dict(spec, version=SPEC_VERSION, name=name, content=fight["name"],
+    canonical = dict(spec, version=SPEC_VERSION, name=name, mode=mode,
                      days=sorted(canonical_days, key=lambda d: d["date"]))
+    if mode == "roles" or content:
+        canonical["content"] = fight["name"]
+    else:
+        canonical.pop("content", None)
+    if mode == "availability":
+        canonical["party_size"] = party_size
     for key in ("cutoff_timezone",):
         if key in canonical:
             canonical[key] = cutoff_tz
-    return Plan(canonical, name, fight, cutoff_tz, days, open_at, {k: v for k, v in announce.items() if v}), []
+    return Plan(canonical, name, fight, cutoff_tz, mode, party_size, days, open_at,
+                {k: v for k, v in announce.items() if v}), []
 
 
 def describe(plan):
     """Plain-text summary of a plan, one line per day, for a preview or a confirmation."""
     tz = ZoneInfo(plan.cutoff_tz)
-    lines = [f"**{plan.name}** · {plan.fight['name']} · {len(plan.days)} days, {len(plan.slots)} candidate slots"]
+    kind = (f"availability only, groups of {plan.party_size}" if plan.mode == "availability"
+            else plan.fight["name"])
+    lines = [f"**{plan.name}** · {kind} · {len(plan.days)} days, {len(plan.slots)} candidate slots"]
     for d in plan.days:
         closes = d.cutoff_utc.astimezone(tz).strftime("%a %d %b %H:%M")
         lines.append(f"• {d.day.strftime('%a %d %b')}: {d.first_start}–{d.last_start}, {len(d.slots)} × "
@@ -307,5 +348,9 @@ def spec_from_run(db, run, cfg, grid):
                         slot_minutes=slots[0]["minutes"])
         days.append(item)
     fight = db.fight(run["fight_id"])
-    return {"version": SPEC_VERSION, "name": run["name"], "content": fight["name"] if fight else "",
+    spec = {"version": SPEC_VERSION, "name": run["name"], "content": fight["name"] if fight else "",
             "cutoff_timezone": grid.tz, "days": days}
+    if run["mode"] == "availability":
+        spec.update(mode="availability", party_size=run["party_size"])
+        spec.pop("content")
+    return spec

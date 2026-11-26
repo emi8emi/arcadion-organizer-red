@@ -19,7 +19,7 @@ PROG_POINTS_DIR = Path(__file__).resolve().parent.parent / "prog_points"
 
 # The newest dashboard migration this code depends on. Raise it in the same change that starts using a
 # new table or column; a database that is further along is fine (migrations only add things).
-REQUIRED_SCHEMA_VERSION = 6
+REQUIRED_SCHEMA_VERSION = 7
 
 
 GUILD_SETTING_KEYS = ("organizer_role_id", "reminder_channel_id", "parties_channel_id",
@@ -111,7 +111,8 @@ class DB:
     # ------------------------------------------------------------ runs
 
     def create_run(self, *, guild_id, name, fight_id, start_date, end_date, cutoffs, slots,
-                   created_by, earliest=None, latest=None, now, spec=None, open_at=None):
+                   created_by, earliest=None, latest=None, now, spec=None, open_at=None, mode="roles",
+                   party_size=None):
         """`cutoffs` maps each day ('2026-11-02') to the UTC datetime its signups close. `spec` is the event's
         JSON description (bot/events.py) and `open_at` when the bot should open it by itself."""
         legacy_deadline = max(cutoffs.values())            # only kept so old code and old databases still make sense
@@ -120,11 +121,12 @@ class DB:
                 run_id = self.conn.execute(
                     """INSERT INTO runs (guild_id, name, fight_id, start_date, end_date, earliest_start,
                                          latest_start, signup_deadline_utc, status, created_by, created_utc,
-                                         spec, open_at_utc)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?::jsonb, ?) RETURNING id""",
+                                         spec, open_at_utc, mode, party_size)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?::jsonb, ?, ?, ?) RETURNING id""",
                     (str(guild_id), name, fight_id, str(start_date), str(end_date), earliest, latest,
                      iso(legacy_deadline), str(created_by), iso(now),
-                     None if spec is None else json.dumps(spec), None if open_at is None else iso(open_at)),
+                     None if spec is None else json.dumps(spec), None if open_at is None else iso(open_at),
+                     mode, party_size),
                     ).fetchone()["id"]
                 self.conn.executemany(
                     "INSERT INTO slots (run_id, slot_key, start_utc, minutes) VALUES (?, ?, ?, ?)",
@@ -231,7 +233,8 @@ class DB:
         """Days that might need an export reminder: runs that were opened, cutoff passed, not exported yet."""
         return self.conn.execute(
             """SELECT d.*, r.guild_id, r.name AS run_name FROM run_days d JOIN runs r ON r.id = d.run_id
-               WHERE r.status IN ('open', 'closed') AND d.exported_utc IS NULL AND d.cutoff_utc <= ?
+               WHERE r.status IN ('open', 'closed') AND r.mode = 'roles' AND d.exported_utc IS NULL
+                 AND d.cutoff_utc <= ?
                ORDER BY d.cutoff_utc, r.id, d.day""", (iso(now),)).fetchall()
 
     def played_counts(self, run_id, before_day):

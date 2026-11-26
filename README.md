@@ -249,7 +249,14 @@ every problem at once.
 }
 ```
 
-* Only `name`, `content` and `days` are required. `days` is a list (a date, or an object that can override
+* **Availability-only events (when2meet style, migration 0007):** `"mode": "availability"` (default `"roles"`) with an
+  optional `"party_size"` (1 to 100, default 8) only collects who can make which slot. `content` is then optional.
+  Players tick slots and nothing else (no roles, prog, limits or characters); there is no solver, draft, party or
+  export reminder, and those commands refuse such an event. `/run status` lists how many people ticked each slot and
+  how many full groups of `party_size` that makes; with `day` it names who is free. `party_size` is refused for
+  `roles` events: a role party's size and role mix come from `party` in `config.json` (custom role lists per event
+  are not built yet). Runs keep a placeholder fight so the schema stays unchanged.
+* Only `name` and `days` are required (and `content` for `roles` events). `days` is a list (a date, or an object that can override
   `first_start`, `last_start`, `slot_minutes` and `cutoff_at` for that day) or a range `{"from", "to"}`. Pick any
   days: skip some, or spread them over weeks, up to `max_run_days`.
 * A day's slot starts are `first_start`, then every `slot_minutes`, up to and including `last_start`. They no longer

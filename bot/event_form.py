@@ -22,6 +22,8 @@ DAY_FIELDS = ("first_start", "last_start", "slot_minutes", "cutoff_at")
 class EventDraft:
     name: str = ""
     content: str = ""
+    mode: str = "roles"                  # "roles" or "availability" (only collect who can make which slot)
+    party_size: str = ""                 # group size of an availability event; "" = the default (8)
     first: object = None                 # the date range as entered; `days` is what is ticked inside it
     last: object = None
     days: list = field(default_factory=list)          # ISO dates
@@ -43,10 +45,16 @@ class EventDraft:
         return [(self.first + timedelta(days=n)).isoformat() for n in range((self.last - self.first).days + 1)]
 
     def ready(self):
-        return bool(self.name and self.content and self.days)
+        return bool(self.name and (self.content or self.mode == "availability") and self.days)
 
     def to_spec(self):
-        spec = {"version": events.SPEC_VERSION, "name": self.name, "content": self.content}
+        spec = {"version": events.SPEC_VERSION, "name": self.name}
+        if self.content and self.mode == "roles":
+            spec["content"] = self.content
+        if self.mode == "availability":
+            spec["mode"] = "availability"
+            if self.party_size:
+                spec["party_size"] = int(self.party_size) if self.party_size.isdigit() else self.party_size
         for key in ("first_start", "last_start", "cutoff_timezone"):
             if getattr(self, key):
                 spec[key] = getattr(self, key)
@@ -140,7 +148,7 @@ class EventFormView(discord.ui.View):
         d = self.draft
         head = "**New event**"
         if not d.ready():
-            body = ("Press **Basics** to set the name, the fight and the dates. Then tick the days, and change times, "
+            body = ("Press **Basics** to set the name, the type, the fight and the dates. Then tick the days, and change times, "
                     "the signup cutoff or the announcement if the defaults are not right. Nothing is saved until you "
                     "press **Create event**.")
         elif self.errors:
@@ -196,21 +204,35 @@ class BasicsModal(discord.ui.Modal):
         self.name = _input("Name", d.name, "UWU week 1", required=True, max_length=60)
         fights = view.ctx.db.fights()[:25]
         self.content = discord.ui.Select(
-            min_values=1, max_values=1,
+            min_values=0, max_values=1, required=False,
             options=[discord.SelectOption(label=f["name"][:100], value=f["name"][:100], default=f["name"] == d.content)
                      for f in fights] or [discord.SelectOption(label="No fights known", value="none")])
         shown = "" if d.first is None else (d.first.isoformat() if d.first == d.last
                                             else f"{d.first.isoformat()} to {d.last.isoformat()}")
         self.dates = _input("Dates", shown, "2026-11-02 to 2026-11-08", required=True, max_length=60)
+        self.kind = discord.ui.Select(
+            min_values=1, max_values=1,
+            options=[discord.SelectOption(label="Raid parties with roles", value="roles", default=d.mode == "roles",
+                                          description="The bot builds role-balanced parties for the fight."),
+                     discord.SelectOption(label="Availability only", value="availability",
+                                          default=d.mode == "availability",
+                                          description="Just collect who can make which slot (like when2meet).")])
+        self.size = _input("Group size", d.party_size, "8", max_length=3)
         self.add_item(discord.ui.Label(text="Name", component=self.name))
-        self.add_item(discord.ui.Label(text="Fight", component=self.content))
+        self.add_item(discord.ui.Label(text="Type of event", component=self.kind))
+        self.add_item(discord.ui.Label(text="Fight", component=self.content,
+                                       description="Raid parties only; leave empty for availability only."))
         self.add_item(discord.ui.Label(text="Dates", component=self.dates,
                                        description="One day, or first to last day. You can untick days afterwards."))
+        self.add_item(discord.ui.Label(text="Group size", component=self.size,
+                                       description="Availability only: the group size you look for. Empty = 8."))
 
     async def on_submit(self, interaction):
         v, d = self.owner, self.owner.draft
         d.name = self.name.value.strip()
         d.content = self.content.values[0] if self.content.values and self.content.values[0] != "none" else ""
+        d.mode = self.kind.values[0] if self.kind.values else "roles"
+        d.party_size = self.size.value.strip()
         try:
             first, last = parse_range(self.dates.value)
         except ValueError as e:

@@ -75,6 +75,15 @@ async def find_run(ctx, interaction, name=None):
     return run
 
 
+async def roles_only(ctx, interaction, run):
+    """False (after telling the organizer) for an availability-only event: it has no roles, solver, drafts or parties."""
+    if run["mode"] == "availability":
+        await say(interaction, f"**{run['name']}** only collects availability (no roles, drafts or parties). "
+                               "Use /run status to see who can make which slot.")
+        return False
+    return True
+
+
 def slug(text):
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-") or "run"
 
@@ -117,7 +126,7 @@ async def submit_event(ctx, interaction, spec):
         ctx.db.create_run(guild_id=interaction.guild_id, name=plan.name, fight_id=plan.fight["id"],
                           start_date=plan.days[0].day, end_date=plan.days[-1].day, cutoffs=plan.cutoffs,
                           slots=plan.slots, created_by=interaction.user.id, now=ctx.now(), spec=plan.spec,
-                          open_at=plan.open_at_utc)
+                          open_at=plan.open_at_utc, mode=plan.mode, party_size=plan.party_size)
     except DuplicateRun:
         await say(interaction, f"A run called '{plan.name}' already exists here.")
         return False
@@ -311,6 +320,8 @@ async def limits(ctx, interaction, max_per_day=None, max_per_run=None, drop_chec
 
 
 async def _limits_for(ctx, interaction, run, max_per_day, max_per_run, drop_checkpoints):
+    if run["mode"] == "availability":
+        return await say(interaction, f"**{run['name']}** only collects availability: there are no limits to set.")
     changing = any(v is not None for v in (max_per_day, max_per_run, drop_checkpoints))
     if changing:
         ok, why = signup_open(ctx, run)
@@ -335,6 +346,10 @@ async def _limits_for(ctx, interaction, run, max_per_day, max_per_run, drop_chec
 
 def schedule_lines(ctx, run, uid):
     keys = ctx.db.ticked_keys(run["id"], uid)
+    if run["mode"] == "availability":
+        lines = [f"**{run['name']}** ({run['status']}, availability only)",
+                 f"Slots you ticked ({len(keys)}), in your local time:"]
+        return lines + double_booking_lines(ctx.db.double_bookings(run["id"], uid)) + (tick_lines(ctx, run, keys) or ["• none"])
     lines = [f"**{run['name']}** ({run['status']})", profile_text(ctx, run, uid),
              *locked_prog_lines(ctx, run, uid),
              f"Slots you ticked ({len(keys)}), in your local time:"]
@@ -387,7 +402,7 @@ async def draft_export(ctx, interaction, name=None, day=None, force=False):
     if not await require_organizer(ctx, interaction):
         return
     run = await find_run(ctx, interaction, name)
-    if run is None:
+    if run is None or not await roles_only(ctx, interaction, run):
         return
     picked = ""
     if day:
@@ -458,7 +473,7 @@ async def draft_import(ctx, interaction, draft_file, name=None, day=None):
     if not await require_organizer(ctx, interaction):
         return
     run = await find_run(ctx, interaction, name)
-    if run is None:
+    if run is None or not await roles_only(ctx, interaction, run):
         return
     day_key = None
     if day:
@@ -500,7 +515,7 @@ async def draft_confirm(ctx, interaction, name=None, day=None):
     if not await require_organizer(ctx, interaction):
         return
     run = await find_run(ctx, interaction, name)
-    if run is None:
+    if run is None or not await roles_only(ctx, interaction, run):
         return
     if day:
         row = await find_day(ctx, interaction, run, day)
@@ -537,7 +552,7 @@ async def party_dashboard(ctx, interaction, name=None, day=None):
     if not await require_organizer(ctx, interaction):
         return
     run = await find_run(ctx, interaction, name)
-    if run is None:
+    if run is None or not await roles_only(ctx, interaction, run):
         return
     day_key = None
     if day:
@@ -554,7 +569,7 @@ async def draft_approve(ctx, interaction, name=None, day=None):
     if not await require_organizer(ctx, interaction):
         return
     run = await find_run(ctx, interaction, name)
-    if run is None:
+    if run is None or not await roles_only(ctx, interaction, run):
         return
     if day:
         row = await find_day(ctx, interaction, run, day)
