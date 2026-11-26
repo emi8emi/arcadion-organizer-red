@@ -139,7 +139,7 @@ Nothing is solved automatically: at each cutoff the bot nags the organizers unti
 | --- | --- | --- |
 | 1 | organizer | `/run create` opens a private **guided form** with a live preview: **Basics** (name, fight, dates), tick the days of the range, **Times** (first and last slot start, slot length), **Cutoff** (time, days before, timezone), a per-day menu to change one day's window, slot length or exact cutoff, and **Announce** (channel, role to ping, message, when to open by itself). Nothing is saved until **Create event**, which stays disabled while the preview lists problems. `/run create` with a JSON file attached does the same from an [event spec](#event-spec-json); `/run spec` sends an existing event's spec back as a file. The result is a draft run with its slot grid and one cutoff per day (default: `cutoff_time` (`23:59`) `cutoff_days_before` (`1`) days earlier, so Monday closes Sunday 23:59). A day already past its cutoff when the run opens starts closed. Creating is refused if a cutoff is not before that day's first slot. |
 | 2 | organizer | `/helper grant @person` for each helper (once per fight). |
-| 3 | organizer | `/run open` starts signups. Only one run can be open at a time. |
+| 3 | organizer | `/run edit` opens a private **panel** for an event (a picker first when several are live): pick a day, then **Open event** / **Close event**, **Close this day now**, **Change cutoff** (also reopens a closed day or event) and **Edit details** (name, and the group size of an availability event). Several events can be open at once. |
 | 4 | players | `/availability`: pick roles (the **Roles** button opens a menu where you tick every role you can play; until you pick some the menu shows a red warning and the player is not placed in any party), prog checkpoint (shown prominently, since it changes), then a day and its slots. Each day shows when it closes; a closed day is read-only. The **Limits** button sets max per day, max per run and how many checkpoints lower they accept. `/limits` and `/myschedule` show the same. Roles, prog and limits stay editable while any day is open. |
 | 5 | organizer | `/run status [day]`: each day's state (open, closed, exported) and cutoff, plus ticks per slot split into the seven roles (MT, OT, RG, SH, ML, RN, CS) with a marker where the role mix could fill a party. |
 | 6 | bot | At a day's cutoff the bot posts in `reminder_channel_id` (pinging `organizer_role_id` if set) and repeats every `reminder_interval_minutes` (30) until that day is exported or its first slot has started. State is kept in the database, so a restart neither repeats nor forgets. With no channel configured the bot logs a warning and `/run create` says so. |
@@ -201,7 +201,7 @@ So at each day's cutoff the bot saves a **snapshot** (`day_snapshots`) of every 
 day: display name, roles, prog and their effective limits (defaults included).
 
 * The once-a-minute loop takes due snapshots (cutoff passed, none yet), also when no reminder channel is set.
-  `/run close [day]` takes the snapshot of each day it closes. A day nobody signed up for still gets the marker
+  closing a day or the event in `/run edit` takes the snapshot of each day it closes. A day nobody signed up for still gets the marker
   (`run_days.snapshot_utc`), so taking it again is a no-op. A snapshot is never overwritten.
 * `/draft export`, `/draft import` and `/run status` take a missing snapshot of a closed day on the spot. It is
   flagged **late** (so is one the loop took more than 5 minutes after the cutoff, for example after downtime),
@@ -210,7 +210,7 @@ day: display name, roles, prog and their effective limits (defaults included).
   change after the cutoff). The remaining per-run cap is the snapshot's `max_per_run` minus the parties the
   player has on earlier days at export time. A forced export of a still-open day has no snapshot and uses live
   data, and the whole-run export without `day` stays live.
-* `/run extend` on a day drops its snapshot (the day reopens); a new one is taken at the new cutoff, and an
+* Changing a day's cutoff in `/run edit` drops its snapshot (the day reopens); a new one is taken at the new cutoff, and an
   earlier export of that day is stale by then.
 * **Helper grants are not snapshotted.** Organizers grant helpers on purpose, so a `/helper grant` or `revoke`
   after the cutoff still changes the export and makes an older draft stale.
@@ -263,7 +263,7 @@ every problem at once.
   have to sit on the old 08:00 grid. Slot times are in the grid timezone (`timezone` in `config.json`);
   `cutoff_at`, `cutoff.time` and `open_at` are read in `cutoff_timezone` (default: the grid timezone).
 * Unknown fields are refused, so a typo does not silently do nothing.
-* `announce`: when the event opens (`/run open`, or by itself at `open_at`) the bot posts the message in `channel_id`,
+* `announce`: when the event opens (**Open event** in `/run edit`, or by itself at `open_at`) the bot posts the message in `channel_id`,
   pinging `ping_role_id`, with each day's cutoff, once. An `open_at` that cannot happen (every day
   is past its cutoff) leaves a draft and tells the reminder channel. The bot needs View Channel and Send
   Messages there, and Mention Roles to ping.
@@ -360,7 +360,7 @@ the file now) and `/debug complete` (mark approved slots as ended so voting can 
 | Who | Command |
 | --- | --- |
 | players | `/availability` (roles, prog, slots), `/limits`, `/myschedule`, `/rate`, `/character add \| verify \| list \| remove` |
-| organizers | `/run create \| open \| close \| extend \| status`, `/helper grant \| revoke`, `/draft export \| import \| confirm \| approve`, `/party import \| dashboard`, `/feedback summary \| player`, `/votes summary`, `/settings show \| set \| clear` (incl. the user panel channel) |
+| organizers | `/run create \| edit \| spec \| status`, `/helper grant \| revoke`, `/draft export \| import \| confirm \| approve`, `/party import \| dashboard`, `/feedback summary \| player`, `/votes summary`, `/settings show \| set \| clear` (incl. the user panel channel) |
 | organizers (needs `DEBUG_COMMANDS=1`) | `/debug complete \| setprog \| score \| sync_checkpoints` |
 
 ## The fingerprint check

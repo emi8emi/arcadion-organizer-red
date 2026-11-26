@@ -326,7 +326,7 @@ def describe(plan):
     if plan.open_at_utc:
         lines.append("Opens by itself at " + plan.open_at_utc.astimezone(tz).strftime("%a %d %b %H:%M") + ".")
     else:
-        lines.append("Stays a draft until an organizer runs /run open.")
+        lines.append("Stays a draft until an organizer opens it with /run edit.")
     return "\n".join(lines)
 
 

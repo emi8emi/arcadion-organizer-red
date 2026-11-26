@@ -1,6 +1,6 @@
 """Opening an event for signups: the checks, the announcement, and opening on schedule (`announce.open_at`).
 
-`open_run` is the one place a draft becomes open; /run open and the scheduled opening both call it.
+`open_run` is the one place a draft becomes open; /run edit and the scheduled opening both call it.
 """
 import logging
 
@@ -53,7 +53,7 @@ async def open_run(ctx, guild_id, run):
     still_open = [r for r in rows if now < cutoff_of(r)]
     if not still_open:
         return False, ("Every day of this run is already past its cutoff, so nobody could sign up. "
-                       "Move a day with /run extend first.")
+                       "Move a day's cutoff in /run edit first.")
     ctx.db.set_run_status(run["id"], "open")
     ctx.db.clear_open_at(run["id"])
     closed = len(rows) - len(still_open)
@@ -82,7 +82,7 @@ async def open_scheduled(ctx):
         try:
             channel = await ctx.get_channel(int(channel_id))
             await channel.send(f"⚠ I could not open **{run['name']}** at its scheduled time: {text} "
-                               "It is still a draft; fix that and run /run open.")
+                               "It is still a draft; fix that and open it in /run edit.")
         except Exception:
             log.warning("could not tell the reminder channel about %s", run["name"], exc_info=True)
     return opened

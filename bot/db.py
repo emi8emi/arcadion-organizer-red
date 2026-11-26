@@ -173,6 +173,21 @@ class DB:
             "SELECT * FROM runs WHERE status = 'draft' AND open_at_utc IS NOT NULL AND open_at_utc <= ? ORDER BY id",
             (iso(now),)).fetchall()
 
+    def update_run_details(self, run_id, name, party_size):
+        """Rename a run and set an availability run's group size; the stored spec follows. DuplicateRun when the
+        name is taken by another run of the server."""
+        try:
+            with self.conn:
+                self.conn.execute(
+                    """UPDATE runs SET name = ?, party_size = ?,
+                       spec = CASE WHEN spec IS NULL THEN NULL ELSE
+                              jsonb_set(CASE WHEN ?::int IS NULL THEN spec ELSE
+                                        jsonb_set(spec, '{party_size}', to_jsonb(?::int)) END,
+                                        '{name}', to_jsonb(?::text)) END
+                       WHERE id = ?""", (name, party_size, party_size, party_size, name, run_id))
+        except psycopg.errors.UniqueViolation as e:
+            raise DuplicateRun(name) from e
+
     def clear_open_at(self, run_id):
         with self.conn:
             self.conn.execute("UPDATE runs SET open_at_utc = NULL WHERE id = ?", (run_id,))
