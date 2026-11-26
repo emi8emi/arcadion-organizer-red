@@ -74,11 +74,66 @@ def day_summary(db, run, cfg, day):
     return len(ready), len(incomplete), fillable
 
 
+def pack(head, blocks):
+    """Join the headline and the blocks into messages under the Discord length limit."""
+    messages, cur = [], "\n".join(head)
+    for b in blocks:
+        if len(cur) + len(b) + 1 > MESSAGE_LIMIT:
+            messages.append(cur)
+            cur = b
+        else:
+            cur += "\n" + b
+    messages.append(cur)
+    return messages
+
+
+def render_availability(db, run, cfg, day=None, preface=None):
+    """Heatmap of an availability-only event (like when2meet): how many people ticked each slot and how many
+    groups of `party_size` that makes. With `day`, the names of who is free are listed under that day's table."""
+    size = run["party_size"] or 8
+    ticks = db.tick_rows(run["id"])
+    who = defaultdict(list)
+    for r in ticks:
+        who[r["slot_key"]].append(r["display_name"])
+    signed = {r["discord_id"] for r in ticks}
+    head = [f"**{run['name']}** ({run['status']}): {len(signed)} people have ticked slots. "
+            f"Looking for groups of {size}."]
+    if preface:
+        head = head[:1] + list(preface) + head[1:]
+    head.append(f"Times are {cfg['timezone']}. \"groups\" = how many full groups of {size} the ticks could make.")
+    days = defaultdict(list)
+    for slot in db.run_slots(run["id"]):
+        days[slot["slot_key"][:10]].append(slot["slot_key"])
+    blocks = []
+    for d in sorted(days):
+        if day and d != day:
+            continue
+        lines = [" time   people  groups"]
+        for key in days[d]:
+            n = len(who.get(key, []))
+            lines.append(f"{key[11:16]}  {n:>6}  {'✓ ' + str(n // size) if n >= size else '--'}")
+        block = f"**{date.fromisoformat(d).strftime('%a %d %b')}**\n```\n" + "\n".join(lines) + "\n```"
+        if day:
+            names = []
+            for key in days[d]:
+                got = sorted(who.get(key, []), key=str.lower)
+                if got:
+                    shown = ", ".join(got[:15]) + (f" and {len(got) - 15} more" if len(got) > 15 else "")
+                    names.append(f"{key[11:16]}: {shown}")
+            block += "\n" + ("\n".join(names) if names else "Nobody has ticked a slot on that day.")
+        blocks.append(block)
+    if not blocks:
+        blocks.append("No one has ticked any slots yet." if not day else "No slots on that day.")
+    return pack(head, blocks)
+
+
 def render(db, run, cfg, day=None, preface=None):
     """The heatmap as a list of messages, each under the Discord length limit.
 
     `preface` (a list of lines, e.g. each day's cutoff and state) goes under the headline.
     """
+    if run["mode"] == "availability":
+        return render_availability(db, run, cfg, day, preface)
     table = slot_table(db, run, cfg)
     ticks = db.tick_rows(run["id"])
     signed = {r["discord_id"] for r in ticks}
@@ -108,12 +163,4 @@ def render(db, run, cfg, day=None, preface=None):
     if not blocks:
         blocks.append("No one has ticked any slots yet." if not day else "No ticks on that day.")
 
-    messages, cur = [], "\n".join(head)
-    for b in blocks:
-        if len(cur) + len(b) + 1 > MESSAGE_LIMIT:
-            messages.append(cur)
-            cur = b
-        else:
-            cur += "\n" + b
-    messages.append(cur)
-    return messages
+    return pack(head, blocks)

@@ -155,6 +155,15 @@ day's export with a warning), and "unmatched last time" looks at the previous da
 falling back to the previous run. Only **confirmed** parties count: if an earlier day still has an unapproved
 draft, the export says its parties are not counted (and which `/draft approve` to run).
 
+### Several events at once
+
+A server can have any number of open events. `/availability`, `/limits` and the panel button ask the player which
+event they mean when more than one is open (with one open event nothing changes); `/myschedule` lists every open
+event. Organizer commands use the newest event by default, but when more than one event is live (draft or open) they ask
+for the `name` option instead of guessing. A player who ticks overlapping slots in two events gets a "Double-booked"
+warning in their availability view and `/myschedule`; nothing stops them, since the bot cannot know which one they
+will play. One prog point per player is still shared by all events (per-fight prog is not built yet).
+
 ### Confirmations and the status dashboard
 
 * **Before approval:** `/draft confirm [day]` posts one message per slot in the parties channel, pinging that slot's
@@ -240,7 +249,14 @@ every problem at once.
 }
 ```
 
-* Only `name`, `content` and `days` are required. `days` is a list (a date, or an object that can override
+* **Availability-only events (when2meet style, migration 0007):** `"mode": "availability"` (default `"roles"`) with an
+  optional `"party_size"` (1 to 100, default 8) only collects who can make which slot. `content` is then optional.
+  Players tick slots and nothing else (no roles, prog, limits or characters); there is no solver, draft, party or
+  export reminder, and those commands refuse such an event. `/run status` lists how many people ticked each slot and
+  how many full groups of `party_size` that makes; with `day` it names who is free. `party_size` is refused for
+  `roles` events: a role party's size and role mix come from `party` in `config.json` (custom role lists per event
+  are not built yet). Runs keep a placeholder fight so the schema stays unchanged.
+* Only `name` and `days` are required (and `content` for `roles` events). `days` is a list (a date, or an object that can override
   `first_start`, `last_start`, `slot_minutes` and `cutoff_at` for that day) or a range `{"from", "to"}`. Pick any
   days: skip some, or spread them over weeks, up to `max_run_days`.
 * A day's slot starts are `first_start`, then every `slot_minutes`, up to and including `last_start`. They no longer
@@ -248,8 +264,8 @@ every problem at once.
   `cutoff_at`, `cutoff.time` and `open_at` are read in `cutoff_timezone` (default: the grid timezone).
 * Unknown fields are refused, so a typo does not silently do nothing.
 * `announce`: when the event opens (`/run open`, or by itself at `open_at`) the bot posts the message in `channel_id`,
-  pinging `ping_role_id`, with each day's cutoff, once. An `open_at` that cannot happen (another event is still open,
-  every day is past its cutoff) leaves a draft and tells the reminder channel. The bot needs View Channel and Send
+  pinging `ping_role_id`, with each day's cutoff, once. An `open_at` that cannot happen (every day
+  is past its cutoff) leaves a draft and tells the reminder channel. The bot needs View Channel and Send
   Messages there, and Mention Roles to ping.
 * **For the dashboard:** write this JSON, or call the same resolver (`bot/events.py` has no Discord dependency), and
   insert the run through `runs`, `run_days` and `slots` as `create_run` does, storing the spec in `runs.spec`.

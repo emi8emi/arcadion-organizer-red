@@ -23,6 +23,7 @@ class AvailabilityView(discord.ui.View):
         self.days = sorted({s["slot_key"][:10] for s in self.slots})
         self.day = next((d["day"] for d in ctx.db.run_days(run["id"])
                          if day_accepts_signups(ctx, run, d)), self.days[0])     # first day still open
+        self.simple = run["mode"] == "availability"      # only days and slots: no roles, prog, limits, characters
 
         # Dropdowns occupy rows 0 to 3
         self.prog_select = ProgSelect()          # row=0
@@ -35,15 +36,10 @@ class AvailabilityView(discord.ui.View):
         self.limits_button = LimitsButton()      # row=4
         self.done_button = DoneButton()          # row=4
 
-        for item in (
-            self.prog_select, 
-            self.day_select, 
-            self.character_select, 
-            self.slot_select,
-            self.roles_button, 
-            self.limits_button, 
-            self.done_button
-        ):
+        items = (self.day_select, self.slot_select, self.done_button) if self.simple else (
+            self.prog_select, self.day_select, self.character_select, self.slot_select,
+            self.roles_button, self.limits_button, self.done_button)
+        for item in items:
             self.add_item(item)
         self.sync()
 
@@ -61,12 +57,12 @@ class AvailabilityView(discord.ui.View):
         prog = player["prog_index"] if player else None
         ticked = set(db.ticked_keys(self.run_id, self.user_id))
 
-        self.roles_button.label = f"Roles ({len(roles)})" if roles else "Roles ⚠ none"
-        self.roles_button.style = discord.ButtonStyle.success if roles else discord.ButtonStyle.danger
-        
-        self.prog_select.options = [
-            discord.SelectOption(label=checkpoint_label(self.checkpoints, c["idx"])[:100], value=str(c["idx"]),
-                                 default=(c["idx"] == prog)) for c in self.checkpoints[:25]]
+        if not self.simple:
+            self.roles_button.label = f"Roles ({len(roles)})" if roles else "Roles ⚠ none"
+            self.roles_button.style = discord.ButtonStyle.success if roles else discord.ButtonStyle.danger
+            self.prog_select.options = [
+                discord.SelectOption(label=checkpoint_label(self.checkpoints, c["idx"])[:100], value=str(c["idx"]),
+                                     default=(c["idx"] == prog)) for c in self.checkpoints[:25]]
         per_day = {d: sum(k[:10] == d for k in ticked) for d in self.days}
         run = self.run
         rows = {r["day"]: r for r in db.run_days(self.run_id)}
@@ -85,7 +81,8 @@ class AvailabilityView(discord.ui.View):
         self.slot_select.disabled = not day_open                  # a closed day keeps its ticks, read-only
         self.slot_select.placeholder = (f"Slots: {day_label(self.day)} ({tz_name})" if day_open
                                         else f"{day_label(self.day)} (locked)")
-        self._sync_character(day_open)
+        if not self.simple:
+            self._sync_character(day_open)
 
     def _sync_character(self, day_open):
         """The character dropdown shows the player's verified characters, with the one used on the edited day selected."""
@@ -139,12 +136,19 @@ class AvailabilityView(discord.ui.View):
                 day_lines.append(f"{day_label(r['day'])}: {discord.utils.format_dt(cutoff_of(r), 'R')}")
             else:
                 day_lines.append(f"{day_label(r['day'])}: closed")
-        parts = [] if split_roles(player["roles"] if player else "") else [NO_ROLES_WARNING]
-        parts += [
-            f"**{run['name']}** | Editing **{day_label(self.day)}** (closes {discord.utils.format_dt(cutoff_of(picked), 'R')})",
-            f"Prog: **{checkpoint_label(self.checkpoints, prog)}** | {self._character_line()}",
-            f"Ticked: {len(keys)} slots | Cutoffs: " + " | ".join(day_lines)
-        ]
+        if self.simple:
+            parts = [f"**{run['name']}** | Editing **{day_label(self.day)}** (closes "
+                     f"{discord.utils.format_dt(cutoff_of(picked), 'R')})",
+                     f"Tick every slot you can make. Looking for groups of {run['party_size']}.",
+                     f"Ticked: {len(keys)} slots | Cutoffs: " + " | ".join(day_lines)]
+        else:
+            parts = [] if split_roles(player["roles"] if player else "") else [NO_ROLES_WARNING]
+            parts += [
+                f"**{run['name']}** | Editing **{day_label(self.day)}** (closes {discord.utils.format_dt(cutoff_of(picked), 'R')})",
+                f"Prog: **{checkpoint_label(self.checkpoints, prog)}** | {self._character_line()}",
+                f"Ticked: {len(keys)} slots | Cutoffs: " + " | ".join(day_lines)
+            ]
+        parts += double_booking_lines(db.double_bookings(self.run_id, self.user_id))
         parts += tick_lines(self.ctx, run, keys, limit=18) or ["• none"]
         return clip_message("\n".join(parts), limit)
 
@@ -578,3 +582,38 @@ class RateListButton(discord.ui.Button):
 
     async def callback(self, interaction):
         await open_rating(self.view.ctx, interaction, self.party_id)
+
+def double_booking_lines(clashes):
+    """Warning lines for slots that overlap a slot the player ticked in another event."""
+    if not clashes:
+        return []
+    shown = [f"{discord.utils.format_dt(parse_iso(start), 'f')} (also in **{name}**)" for start, name in clashes[:4]]
+    more = f" and {len(clashes) - 4} more" if len(clashes) > 4 else ""
+    return ["⚠ **Double-booked:** you ticked these at the same time as another event: " + "; ".join(shown) + more
+            + ". You can only play one of them."]
+
+
+class RunPickerView(discord.ui.View):
+    """Several events take signups at once: the player picks which one this command is about."""
+
+    def __init__(self, runs, user_id, on_pick):
+        super().__init__(timeout=300)
+        self.user_id, self.on_pick = user_id, on_pick
+        self.by_id = {str(r["id"]): r for r in runs[:25]}
+        select = discord.ui.Select(
+            placeholder="Which event?", min_values=1, max_values=1,
+            options=[discord.SelectOption(label=r["name"][:100], value=str(r["id"])) for r in runs[:25]])
+        select.callback = self._picked
+        self.add_item(select)
+        self.select = select
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This picker is not yours.", ephemeral=True)
+            return False
+        return True
+
+    async def _picked(self, interaction):
+        run = self.by_id.get(self.select.values[0])
+        self.stop()
+        await self.on_pick(interaction, run)

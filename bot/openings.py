@@ -48,13 +48,6 @@ async def open_run(ctx, guild_id, run):
     """Open a draft run. Returns (ok, text); the text is the reply for an organizer."""
     if run["status"] == "open":
         return False, f"**{run['name']}** is already open."
-    other = ctx.db.open_run(guild_id)
-    stale = ""
-    if other:
-        if open_days(ctx, other):
-            return False, f"**{other['name']}** is still open. Close it first with /run close."
-        ctx.db.set_run_status(other["id"], "closed")           # every day of it is past its cutoff anyway
-        stale = f" (I closed **{other['name']}**: all its days were already past their cutoffs.)"
     rows = ctx.db.run_days(run["id"])
     now = ctx.now()
     still_open = [r for r in rows if now < cutoff_of(r)]
@@ -68,13 +61,12 @@ async def open_run(ctx, guild_id, run):
             f"{len(still_open)} of {len(rows)} days take signups"
             + (f" ({closed} already closed)" if closed else "")
             + f", the next cutoff is {day_label(still_open[0]['day'])}, "
-              f"{discord.utils.format_dt(cutoff_of(still_open[0]), 'F')}." + stale)
+              f"{discord.utils.format_dt(cutoff_of(still_open[0]), 'F')}.")
     return True, text + await announce(ctx, run, rows)
 
 
 async def open_scheduled(ctx):
-    """Open every draft whose `announce.open_at` has passed. A draft that cannot open (another event is still
-    open, every day is past its cutoff) is left as a draft, `open_at` is cleared so it is not retried every
+    """Open every draft whose `announce.open_at` has passed. A draft that cannot open (every day is past its cutoff) is left as a draft, `open_at` is cleared so it is not retried every
     minute, and the reminder channel is told. Returns the number opened."""
     opened = 0
     for run in ctx.db.due_scheduled_opens(ctx.now()):
