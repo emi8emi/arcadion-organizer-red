@@ -153,14 +153,15 @@ def test_open_and_close_lifecycle(ctx, make_run):
     assert "already open" in do(ctx, handlers.run_open, organizer()).text
 
     second = make_run("Second", status="draft")
-    assert "still open" in do(ctx, handlers.run_open, organizer(), "Second").text
+    assert "Several events are live" in do(ctx, handlers.run_close, organizer()).text    # which one? it asks
+    assert "is open" in do(ctx, handlers.run_open, organizer(), "Second").text           # a second event at once
+    assert {r["name"] for r in ctx.db.open_runs(100)} == {"UWU week 1", "Second"}
 
     add_player(ctx, run, 1, ["melee"], 0, [SLOT])
-    it = do(ctx, handlers.run_close, organizer())              # newest run is "Second", which is not open
-    assert "is not open" in it.text
     it = do(ctx, handlers.run_close, organizer(), "UWU week 1")
     assert "closed for every day, with 1 players" in it.text and ctx.db.run(run["id"])["status"] == "closed"
-    assert ctx.db.run(second["id"])["status"] == "draft"
+    assert ctx.db.run(second["id"])["status"] == "open"
+    assert "is not open" in do(ctx, handlers.run_close, organizer(), "UWU week 1").text
 
 
 def test_open_refuses_after_the_deadline(ctx, make_run, clock):

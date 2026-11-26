@@ -7,7 +7,7 @@ The bot does not own the schema: the dashboard does (dashboard/server/app/migrat
 only checks that the database has been migrated far enough, and refuses to start otherwise.
 """
 import json
-from datetime import datetime, timezone
+from datetime import timedelta, datetime, timezone
 from pathlib import Path
 
 import psycopg.errors
@@ -155,6 +155,16 @@ class DB:
             "SELECT * FROM runs WHERE guild_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1",
             (str(guild_id),)).fetchone()
 
+    def open_runs(self, guild_id):
+        """Every run of the server that is open for signups (several events can run at the same time)."""
+        return self.conn.execute(
+            "SELECT * FROM runs WHERE guild_id = ? AND status = 'open' ORDER BY id", (str(guild_id),)).fetchall()
+
+    def live_runs(self, guild_id):
+        """Runs that are not closed: drafts and open ones."""
+        return self.conn.execute(
+            "SELECT * FROM runs WHERE guild_id = ? AND status <> 'closed' ORDER BY id", (str(guild_id),)).fetchall()
+
     def due_scheduled_opens(self, now):
         """Drafts whose open_at has passed."""
         return self.conn.execute(
@@ -268,6 +278,26 @@ class DB:
                WHERE a.run_id = ? AND a.discord_id = ? ORDER BY s.start_utc""",
             (run_id, str(discord_id))).fetchall()
         return [r["slot_key"] for r in rows]
+
+    def double_bookings(self, run_id, discord_id):
+        """Slots this player ticked in this run that overlap a slot they ticked in another run that is still live
+        (draft or open): [(start_utc, other run name)], earliest first. Events can run at the same time, so the
+        same person may sign up for both; this only lets the bot warn them."""
+        rows = self.conn.execute(
+            """SELECT s.id, s.start_utc, s.minutes, s.run_id, r.name, r.status
+               FROM availability a JOIN slots s ON s.id = a.slot_id JOIN runs r ON r.id = s.run_id
+               WHERE a.discord_id = ? AND r.status <> 'closed'
+                 AND r.guild_id = (SELECT guild_id FROM runs WHERE id = ?)""",
+            (str(discord_id), run_id)).fetchall()
+        spans = [(parse_iso(r["start_utc"]), parse_iso(r["start_utc"]) + timedelta(minutes=r["minutes"]), r)
+                 for r in rows]
+        mine = [x for x in spans if x[2]["run_id"] == run_id]
+        out = []
+        for start, end, r in mine:
+            for o_start, o_end, o in spans:
+                if o["run_id"] != run_id and o_start < end and start < o_end:
+                    out.append((r["start_utc"], o["name"]))
+        return sorted(set(out))
 
     def set_day_availability(self, run_id, discord_id, day, keys):
         """Replace this player's ticks for one local day (slot keys starting with 'YYYY-MM-DD')."""

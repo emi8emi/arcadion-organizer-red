@@ -213,13 +213,12 @@ def test_an_event_opens_by_itself_at_open_at(ctx, channels, clock):
 
 def test_a_scheduled_opening_that_cannot_happen_tells_the_reminder_channel_once(ctx, channels, clock, make_run):
     ctx.cfg["reminder_channel_id"] = 22
-    make_run("Busy", status="open", deadline=datetime(2026, 11, 9, tzinfo=UTC))             # still taking signups
     run = created(ctx, announce={"open_at": "2026-10-28 12:00"})
-    clock["now"] = datetime(2026, 10, 29, tzinfo=UTC)
+    clock["now"] = datetime(2027, 1, 1, tzinfo=UTC)                  # every day is past its cutoff by then
     assert run_async(openings.open_scheduled(ctx)) == 0
     assert ctx.db.run(run["id"])["status"] == "draft" and ctx.db.run(run["id"])["open_at_utc"] is None
     [note] = channels[22].sent
-    assert "could not open **UWU week 1**" in note["content"] and "Busy" in note["content"]
+    assert "could not open **UWU week 1**" in note["content"] and "past its cutoff" in note["content"]
     assert run_async(openings.open_scheduled(ctx)) == 0 and len(channels[22].sent) == 1    # not retried
 
 

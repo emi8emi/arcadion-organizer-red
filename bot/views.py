@@ -145,6 +145,7 @@ class AvailabilityView(discord.ui.View):
             f"Prog: **{checkpoint_label(self.checkpoints, prog)}** | {self._character_line()}",
             f"Ticked: {len(keys)} slots | Cutoffs: " + " | ".join(day_lines)
         ]
+        parts += double_booking_lines(db.double_bookings(self.run_id, self.user_id))
         parts += tick_lines(self.ctx, run, keys, limit=18) or ["• none"]
         return clip_message("\n".join(parts), limit)
 
@@ -578,3 +579,38 @@ class RateListButton(discord.ui.Button):
 
     async def callback(self, interaction):
         await open_rating(self.view.ctx, interaction, self.party_id)
+
+def double_booking_lines(clashes):
+    """Warning lines for slots that overlap a slot the player ticked in another event."""
+    if not clashes:
+        return []
+    shown = [f"{discord.utils.format_dt(parse_iso(start), 'f')} (also in **{name}**)" for start, name in clashes[:4]]
+    more = f" and {len(clashes) - 4} more" if len(clashes) > 4 else ""
+    return ["⚠ **Double-booked:** you ticked these at the same time as another event: " + "; ".join(shown) + more
+            + ". You can only play one of them."]
+
+
+class RunPickerView(discord.ui.View):
+    """Several events take signups at once: the player picks which one this command is about."""
+
+    def __init__(self, runs, user_id, on_pick):
+        super().__init__(timeout=300)
+        self.user_id, self.on_pick = user_id, on_pick
+        self.by_id = {str(r["id"]): r for r in runs[:25]}
+        select = discord.ui.Select(
+            placeholder="Which event?", min_values=1, max_values=1,
+            options=[discord.SelectOption(label=r["name"][:100], value=str(r["id"])) for r in runs[:25]])
+        select.callback = self._picked
+        self.add_item(select)
+        self.select = select
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This picker is not yours.", ephemeral=True)
+            return False
+        return True
+
+    async def _picked(self, interaction):
+        run = self.by_id.get(self.select.values[0])
+        self.stop()
+        await self.on_pick(interaction, run)

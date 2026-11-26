@@ -210,17 +210,15 @@ def test_run_extend_can_use_another_timezone(ctx, make_run, clock):
     assert ctx.db.run_day(run["id"], "2026-11-01")["cutoff_utc"] == "2026-11-01T12:00:00+00:00"   # 09:00 BRT is UTC-3
 
 
-def test_run_extend_reopens_a_closed_run_unless_another_run_is_open(ctx, make_run, clock):
+def test_run_extend_reopens_a_closed_run_even_while_another_run_is_open(ctx, make_run, clock):
     run = make_run(per_day=True)
     at(clock, "2026-11-01T04:30")
     ctx.db.set_run_status(run["id"], "closed")
     other = make_run("Other", start=date(2026, 11, 10), end=date(2026, 11, 10), per_day=True)
     extend = lambda: do(ctx, handlers.run_extend, organizer(), "2026-11-01", "2026-11-01 07:00", "UWU week 1")
-    assert "is open; close it" in extend().text
-    assert ctx.db.run(run["id"])["status"] == "closed"
-    ctx.db.set_run_status(other["id"], "closed")
+    ctx.db.set_run_status(other["id"], "open")                       # events can run at the same time
     extend()
-    assert ctx.db.run(run["id"])["status"] == "open"
+    assert ctx.db.run(run["id"])["status"] == "open" and ctx.db.run(other["id"])["status"] == "open"
 
 
 def test_close_and_extend_are_organizer_only(ctx, make_run):
@@ -241,13 +239,13 @@ def test_open_reports_closed_days_and_refuses_when_none_is_left(ctx, make_run, c
     assert "past its cutoff" in do(ctx, handlers.run_open, organizer()).text
 
 
-def test_open_closes_a_finished_run_automatically(ctx, make_run, clock):
+def test_opening_a_run_leaves_the_other_open_runs_alone(ctx, make_run, clock):
     old = make_run("Old", status="open")                            # shared cutoff 2026-10-30 22:00Z
     new = make_run("New", start=date(2026, 11, 10), end=date(2026, 11, 10), status="draft", per_day=True)
     at(clock, "2026-11-05T12:00")
     it = do(ctx, handlers.run_open, organizer(), "New")
-    assert "I closed **Old**" in it.text
-    assert ctx.db.run(old["id"])["status"] == "closed" and ctx.db.run(new["id"])["status"] == "open"
+    assert "is open" in it.text and "closed **Old**" not in it.text
+    assert ctx.db.run(old["id"])["status"] == "open" and ctx.db.run(new["id"])["status"] == "open"
 
 
 def test_run_status_lists_each_days_state(ctx, make_run, clock):

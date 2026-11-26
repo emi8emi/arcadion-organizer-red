@@ -26,7 +26,7 @@ from .snapshots import ensure_snapshot
 from .solver_io import DraftError, build_signups, fingerprint, import_draft, is_note
 from .posting import post_day_parties
 from .parties import apply_swap, plan_import
-from .views import AvailabilityView, RateListView
+from .views import AvailabilityView, RateListView, RunPickerView, double_booking_lines
 from .votes import (FEEDBACK_CATEGORIES, feedback_counts, party_rating_counts, rateable_parties, slot_end,
                     summary_counts)
 
@@ -61,6 +61,14 @@ async def require_organizer(ctx, interaction):
 
 
 async def find_run(ctx, interaction, name=None):
+    """The run named `name`. Without a name: the newest run, unless several runs are live (draft or open) at
+    once, because guessing which event an organizer means could change the wrong one."""
+    if not name:
+        live = ctx.db.live_runs(interaction.guild_id)
+        if len(live) > 1:
+            names = ", ".join(f"**{r['name']}** ({r['status']})" for r in live[:10])
+            await say(interaction, f"Several events are live: {names}. Give the event's name in the `name` option.")
+            return None
     run = ctx.db.get_run(interaction.guild_id, name)
     if run is None:
         await say(interaction, f"No run called '{name}' in this server." if name else "There are no runs yet. Use /run create.")
@@ -222,9 +230,6 @@ async def run_extend(ctx, interaction, day, new_cutoff, name=None, timezone=None
     if cutoff <= ctx.now():
         return await say(interaction, "That time has already passed. To close a day now use /run close with its day.")
     if run["status"] == "closed":
-        other = ctx.db.open_run(interaction.guild_id)
-        if other and other["id"] != run["id"] and open_days(ctx, other):
-            return await say(interaction, f"**{other['name']}** is open; close it before reopening **{run['name']}**.")
         ctx.db.set_run_status(run["id"], "open")
     was_exported = bool(row["exported_utc"])
     ctx.db.set_cutoff(run["id"], row["day"], cutoff, reset_export=True)
@@ -257,25 +262,55 @@ async def run_status(ctx, interaction, name=None, day=None):
 
 # ---------------------------------------------------------------- player commands
 
-async def availability(ctx, interaction, timezone=None):
-    run = ctx.db.open_run(interaction.guild_id)
-    if run is None:
+def signup_runs(ctx, guild_id):
+    """The events players can sign up for now: open, with at least one day still taking signups."""
+    return [r for r in ctx.db.open_runs(guild_id) if open_days(ctx, r)]
+
+
+async def choose_run(ctx, interaction, proceed):
+    """Run `proceed(interaction, run)` for the event the player means: the only one open, or the one they pick
+    when several are open at once. Tells the player when none is open."""
+    runs = signup_runs(ctx, interaction.guild_id)
+    if not runs:
+        stale = ctx.db.open_runs(interaction.guild_id)
+        if stale:
+            return await say(interaction, signup_open(ctx, stale[0])[1])
         return await say(interaction, "No run is open for signups right now.")
-    ok, why = signup_open(ctx, run)
-    if not ok:
-        return await say(interaction, why)
+    if len(runs) == 1:
+        return await proceed(interaction, runs[0])
+
+    async def picked(pick_interaction, run):
+        try:
+            await interaction.edit_original_response(content=f"You picked **{run['name']}**.", view=None)
+        except discord.HTTPException:
+            pass
+        await proceed(pick_interaction, run)
+    view = RunPickerView(runs, interaction.user.id, picked)
+    await interaction.response.send_message("Several events are open. Which one is this about?", view=view,
+                                            ephemeral=True)
+
+
+async def availability(ctx, interaction, timezone=None):
     if timezone is not None and not valid_timezone(timezone):
         return await say(interaction, f"'{timezone}' is not a timezone name like America/Chicago.")
-    ctx.db.upsert_player(interaction.user.id, interaction.user.display_name, timezone=timezone, now=ctx.now())
-    view = AvailabilityView(ctx, run, interaction.user.id, interaction.user.display_name)
-    await interaction.response.send_message(view.render(), view=view, ephemeral=True)
 
+    async def proceed(it, run):
+        ok, why = signup_open(ctx, run)
+        if not ok:
+            return await say(it, why)
+        ctx.db.upsert_player(it.user.id, it.user.display_name, timezone=timezone, now=ctx.now())
+        view = AvailabilityView(ctx, run, it.user.id, it.user.display_name)
+        await it.response.send_message(view.render(), view=view, ephemeral=True)
+    await choose_run(ctx, interaction, proceed)
 
 
 async def limits(ctx, interaction, max_per_day=None, max_per_run=None, drop_checkpoints=None):
-    run = ctx.db.open_run(interaction.guild_id)
-    if run is None:
-        return await say(interaction, "No run is open for signups right now.")
+    async def proceed(it, run):
+        await _limits_for(ctx, it, run, max_per_day, max_per_run, drop_checkpoints)
+    await choose_run(ctx, interaction, proceed)
+
+
+async def _limits_for(ctx, interaction, run, max_per_day, max_per_run, drop_checkpoints):
     changing = any(v is not None for v in (max_per_day, max_per_run, drop_checkpoints))
     if changing:
         ok, why = signup_open(ctx, run)
@@ -298,15 +333,12 @@ async def limits(ctx, interaction, max_per_day=None, max_per_run=None, drop_chec
     await say(interaction, f"**{run['name']}**\n{limits_text(lim)}{note}" + (f"\nℹ {saved}" if saved else ""))
 
 
-async def myschedule(ctx, interaction):
-    run = ctx.db.open_run(interaction.guild_id) or ctx.db.get_run(interaction.guild_id)
-    if run is None:
-        return await say(interaction, "There are no runs yet.")
-    uid = interaction.user.id
+def schedule_lines(ctx, run, uid):
     keys = ctx.db.ticked_keys(run["id"], uid)
     lines = [f"**{run['name']}** ({run['status']})", profile_text(ctx, run, uid),
              *locked_prog_lines(ctx, run, uid),
              f"Slots you ticked ({len(keys)}), in your local time:"]
+    lines += double_booking_lines(ctx.db.double_bookings(run["id"], uid))
     lines += tick_lines(ctx, run, keys) or ["• none"]
     mine = ctx.db.player_parties(run["id"], uid)
     if mine:
@@ -317,7 +349,16 @@ async def myschedule(ctx, interaction):
             lines.append(f"• {when} as {role_label(p['role'])}" + (f" ({ch.label(char)})" if char else ""))
     elif ctx.db.parties(run["id"]):
         lines.append("A draft is with the organizers; your parties show up here once they are confirmed.")
-    await say(interaction, "\n".join(lines)[:1990])
+    return lines
+
+
+async def myschedule(ctx, interaction):
+    """Every open event (several can run at once), else the newest run."""
+    runs = ctx.db.open_runs(interaction.guild_id) or [r for r in [ctx.db.get_run(interaction.guild_id)] if r]
+    if not runs:
+        return await say(interaction, "There are no runs yet.")
+    blocks = ["\n".join(schedule_lines(ctx, run, interaction.user.id)) for run in runs]
+    await say(interaction, "\n\n".join(blocks)[:1990])
 
 
 # ---------------------------------------------------------------- /draft

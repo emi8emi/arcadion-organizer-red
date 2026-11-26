@@ -155,6 +155,15 @@ day's export with a warning), and "unmatched last time" looks at the previous da
 falling back to the previous run. Only **confirmed** parties count: if an earlier day still has an unapproved
 draft, the export says its parties are not counted (and which `/draft approve` to run).
 
+### Several events at once
+
+A server can have any number of open events. `/availability`, `/limits` and the panel button ask the player which
+event they mean when more than one is open (with one open event nothing changes); `/myschedule` lists every open
+event. Organizer commands use the newest event by default, but when more than one event is live (draft or open) they ask
+for the `name` option instead of guessing. A player who ticks overlapping slots in two events gets a "Double-booked"
+warning in their availability view and `/myschedule`; nothing stops them, since the bot cannot know which one they
+will play. One prog point per player is still shared by all events (per-fight prog is not built yet).
+
 ### Confirmations and the status dashboard
 
 * **Before approval:** `/draft confirm [day]` posts one message per slot in the parties channel, pinging that slot's
@@ -248,8 +257,8 @@ every problem at once.
   `cutoff_at`, `cutoff.time` and `open_at` are read in `cutoff_timezone` (default: the grid timezone).
 * Unknown fields are refused, so a typo does not silently do nothing.
 * `announce`: when the event opens (`/run open`, or by itself at `open_at`) the bot posts the message in `channel_id`,
-  pinging `ping_role_id`, with each day's cutoff, once. An `open_at` that cannot happen (another event is still open,
-  every day is past its cutoff) leaves a draft and tells the reminder channel. The bot needs View Channel and Send
+  pinging `ping_role_id`, with each day's cutoff, once. An `open_at` that cannot happen (every day
+  is past its cutoff) leaves a draft and tells the reminder channel. The bot needs View Channel and Send
   Messages there, and Mention Roles to ping.
 * **For the dashboard:** write this JSON, or call the same resolver (`bot/events.py` has no Discord dependency), and
   insert the run through `runs`, `run_days` and `slots` as `create_run` does, storing the spec in `runs.spec`.
