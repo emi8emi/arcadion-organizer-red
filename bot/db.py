@@ -188,6 +188,63 @@ class DB:
         except psycopg.errors.UniqueViolation as e:
             raise DuplicateRun(name) from e
 
+    def add_days(self, run_id, slots, cutoffs):
+        """Add days to a run: their slots and one cutoff each (`cutoffs` maps 'YYYY-MM-DD' to a UTC datetime)."""
+        with self.conn:
+            self.conn.executemany(
+                "INSERT INTO slots (run_id, slot_key, start_utc, minutes) VALUES (?, ?, ?, ?)",
+                [(run_id, sl.key, iso(sl.start_utc), sl.minutes) for sl in slots])
+            self.conn.executemany(
+                "INSERT INTO run_days (run_id, day, cutoff_utc) VALUES (?, ?, ?)",
+                [(run_id, day, iso(cutoff)) for day, cutoff in sorted(cutoffs.items())])
+            self._refresh_span(run_id)
+
+    def day_blockers(self, run_id, day):
+        """Why a day cannot be removed: it was exported, or it has parties. Empty list when it can go."""
+        why = []
+        if self.conn.execute("SELECT 1 FROM run_days WHERE run_id = ? AND day = ? AND exported_utc IS NOT NULL",
+                             (run_id, day)).fetchone():
+            why.append("it was exported")
+        if self.conn.execute("SELECT 1 FROM parties p JOIN slots s ON s.id = p.slot_id "
+                             "WHERE p.run_id = ? AND substr(s.slot_key, 1, 10) = ? LIMIT 1", (run_id, day)).fetchone():
+            why.append("it has parties")
+        return why
+
+    def remove_days(self, run_id, days):
+        """Remove days with their slots, signups and snapshot. Returns how many signups (ticks) were dropped."""
+        dropped = 0
+        with self.conn:
+            for day in days:
+                dropped += self.conn.execute(
+                    "SELECT count(*) AS n FROM availability a JOIN slots s ON s.id = a.slot_id "
+                    "WHERE a.run_id = ? AND substr(s.slot_key, 1, 10) = ?", (run_id, day)).fetchone()["n"]
+                self.conn.execute("DELETE FROM slots WHERE run_id = ? AND substr(slot_key, 1, 10) = ?", (run_id, day))
+                self.conn.execute("DELETE FROM day_snapshots WHERE run_id = ? AND day = ?", (run_id, day))
+                self.conn.execute("DELETE FROM run_days WHERE run_id = ? AND day = ?", (run_id, day))
+            self._refresh_span(run_id)
+        return dropped
+
+    def _refresh_span(self, run_id):
+        self.conn.execute(
+            "UPDATE runs SET start_date = (SELECT min(day) FROM run_days WHERE run_id = ?), "
+            "end_date = (SELECT max(day) FROM run_days WHERE run_id = ?) WHERE id = ?", (run_id, run_id, run_id))
+
+    def set_spec(self, run_id, spec):
+        with self.conn:
+            self.conn.execute("UPDATE runs SET spec = ?::jsonb WHERE id = ?", (json.dumps(spec), run_id))
+
+    def delete_run(self, run_id):
+        """Delete a run and everything that hangs off it (days, slots, signups, parties, ratings: all cascade)."""
+        with self.conn:
+            self.conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
+
+    def run_counts(self, run_id):
+        """(players who ticked something, parties) of a run, for the delete confirmation."""
+        players = self.conn.execute("SELECT count(DISTINCT discord_id) AS n FROM availability WHERE run_id = ?",
+                                    (run_id,)).fetchone()["n"]
+        parties = self.conn.execute("SELECT count(*) AS n FROM parties WHERE run_id = ?", (run_id,)).fetchone()["n"]
+        return players, parties
+
     def clear_open_at(self, run_id):
         with self.conn:
             self.conn.execute("UPDATE runs SET open_at_utc = NULL WHERE id = ?", (run_id,))

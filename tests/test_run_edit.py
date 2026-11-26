@@ -151,3 +151,113 @@ def test_an_unknown_name_is_reported(ctx, make_run):
     it = organizer()
     run_async(run_edit.start(ctx, it, "nope"))
     assert "No run called 'nope'" in it.text
+
+
+# ---------------------------------------------------------------- change days and delete
+
+def days_of(ctx, run):
+    return [r["day"] for r in ctx.db.run_days(run["id"])]
+
+
+def submit_days(view, add="", remove=()):
+    modal = run_edit.DaysModal(view)
+    modal.add._value = add
+    modal.remove._values = list(remove)
+    it = organizer()
+    run_async(modal.on_submit(it))
+    return text_of(it)
+
+
+def test_add_days_copy_the_first_days_window_and_get_the_default_cutoff(ctx, make_run):
+    run = make_run("Event A")
+    before = days_of(ctx, run)
+    _, view, _ = panel(ctx)
+    text = submit_days(view, "2026-11-20 to 2026-11-21, 2026-11-25")
+    assert "added 3 day(s)" in text
+    assert days_of(ctx, run) == before + ["2026-11-20", "2026-11-21", "2026-11-25"]
+    keys = [s["slot_key"] for s in ctx.db.run_slots(run["id"]) if s["slot_key"].startswith("2026-11-20")]
+    assert keys and keys[0] == "2026-11-20T08:00"
+    assert ctx.db.run(run["id"])["end_date"] == "2026-11-25"
+    assert ctx.db.run_day(run["id"], "2026-11-20")["cutoff_utc"].startswith("2026-11-20T04:59")     # 23:59 the day before
+    assert "2026-11-25" in {o.value for o in view.day_select.options}
+
+
+def test_adding_a_day_that_exists_or_garbage_changes_nothing(ctx, make_run):
+    run = make_run("Event A")
+    before = days_of(ctx, run)
+    _, view, _ = panel(ctx)
+    assert "Nothing to change" in submit_days(view, before[0])
+    assert "Add days:" in submit_days(view, "whenever")
+    assert days_of(ctx, run) == before
+
+
+def test_remove_a_day_drops_its_signups_and_keeps_the_others(ctx, make_run):
+    run = make_run("Event A")
+    days = days_of(ctx, run)
+    add_player(ctx, run, 1, ["melee"], 0, [SLOT])
+    gone = SLOT[:10]
+    _, view, _ = panel(ctx)
+    text = submit_days(view, "", [gone])
+    assert "removed 1 day(s)" in text and "dropped 1 signed-up slot(s)" in text
+    assert days_of(ctx, run) == [d for d in days if d != gone]
+    assert ctx.db.ticked_keys(run["id"], 1) == []
+    assert not [s for s in ctx.db.run_slots(run["id"]) if s["slot_key"].startswith(gone)]
+    if view.day == gone:
+        raise AssertionError("the panel still points at a removed day")
+
+
+def test_a_day_with_parties_or_an_export_cannot_be_removed(ctx, make_run):
+    from test_approve import setup_day, D2
+    run, _ = setup_day(ctx, make_run)
+    _, view, _ = panel(ctx)
+    day = ctx.db.parties(run["id"])[0]["slot_key"][:10]
+    before = days_of(ctx, run)
+    assert "cannot be removed: it has parties" in submit_days(view, "", [day])
+    assert days_of(ctx, run) == before
+    ctx.db.mark_exported(run["id"], before[0], ctx.now())
+    assert "it was exported" in submit_days(view, "", [before[0]])
+
+
+def test_the_last_day_cannot_be_removed_and_the_limit_holds(ctx, make_run):
+    run = make_run("Event A")
+    _, view, _ = panel(ctx)
+    assert "at least one day" in submit_days(view, "", days_of(ctx, run))
+    ctx.cfg["max_run_days"] = len(days_of(ctx, run))
+    assert "at most" in submit_days(view, "2026-12-01")
+
+
+def test_the_stored_spec_follows_the_days(ctx):
+    from test_availability_events import make
+    run = make(ctx)
+    _, view, _ = panel(ctx)
+    submit_days(view, "2026-11-10", ["2026-11-02"])
+    spec = ctx.db.run(run["id"])["spec"]
+    assert [d["date"] for d in spec["days"]] == ["2026-11-03", "2026-11-10"]
+    assert ctx.db.run(run["id"])["start_date"] == "2026-11-03"
+
+
+def test_delete_asks_first_then_removes_everything(ctx, make_run):
+    run = make_run("Event A")
+    add_player(ctx, run, 1, ["melee"], 0, [SLOT])
+    _, view, _ = panel(ctx)
+    it = click(None, view.delete_button)
+    confirm = it.response.edits[-1]["view"]
+    assert "Delete **Event A** for good" in it.response.edits[-1]["content"] and "1 signed-up players" in confirm.text()
+    assert ctx.db.run(run["id"]) is not None                     # nothing deleted yet
+    back = organizer()
+    run_async(confirm.children[1].callback(back))                 # Keep it
+    assert ctx.db.run(run["id"]) is not None and "**Event A**" in back.response.edits[-1]["content"]
+    done = organizer()
+    run_async(confirm.children[0].callback(done))                 # Yes, delete it
+    assert ctx.db.run(run["id"]) is None and "was deleted" in done.response.edits[-1]["content"]
+    assert ctx.db.get_run(100) is None
+
+
+def test_delete_works_on_a_closed_event_and_only_for_the_panels_owner(ctx, make_run):
+    run = make_run("Event A", status="closed")
+    _, view, _ = panel(ctx)
+    it = click(None, view.delete_button)
+    confirm = it.response.edits[-1]["view"]
+    assert run_async(confirm.interaction_check(organizer(user_id=999))) is False
+    run_async(confirm.children[0].callback(organizer()))
+    assert ctx.db.run(run["id"]) is None

@@ -3,13 +3,15 @@
 The functions at the top do the work and return the text to show; the panel (`RunEditView`) and the plain handler
 entry points (`handlers.run_open`, `run_close`, `run_extend`) both call them, so they cannot disagree.
 """
+import re
+from datetime import timedelta
 from zoneinfo import ZoneInfo, available_timezones
 
 import discord
 
 from . import events, handlers, openings
 from .db import DuplicateRun, parse_iso
-from .event_form import _input
+from .event_form import _input, parse_range
 from .grid import parse_local_datetime
 from .services import cutoff_of, day_label, day_state
 from .snapshots import ensure_snapshot
@@ -106,6 +108,75 @@ def edit_details(ctx, run, name, party_size):
     return True, "Saved."
 
 
+def parse_added_days(text):
+    """'2026-11-09 to 2026-11-11, 2026-11-14' -> sorted unique ISO dates. Raises ValueError with a reason."""
+    found = set()
+    for part in re.split(r"[,;\n]+", text or ""):
+        if not part.strip():
+            continue
+        first, last = parse_range(part)
+        if (last - first).days > 60:
+            raise ValueError("That range is too long.")
+        found.update((first + timedelta(days=n)).isoformat() for n in range((last - first).days + 1))
+    return sorted(found)
+
+
+def change_days(ctx, run, add_text, remove):
+    """Add days (new days copy the time window of the event's first day and get the default cutoff) and/or remove
+    days (refused for a day that was exported or has parties). Returns (ok, text)."""
+    try:
+        added = parse_added_days(add_text)
+    except ValueError as e:
+        return False, f"Add days: {e or 'use 2026-11-09, or 2026-11-09 to 2026-11-11, separated by commas.'}"
+    current = [r["day"] for r in ctx.db.run_days(run["id"])]
+    added = [d for d in added if d not in current]
+    remove = [d for d in remove if d in current]
+    if not added and not remove:
+        return False, "Nothing to change: no new days, and no days picked to remove."
+    for day in remove:
+        why = ctx.db.day_blockers(run["id"], day)
+        if why:
+            return False, f"{day_label(day)} cannot be removed: {' and '.join(why)}. Nothing was changed."
+    remaining = [d for d in current if d not in remove]
+    if not remaining and not added:
+        return False, "An event needs at least one day. Delete the event instead."
+    if len(remaining) + len(added) > ctx.cfg["max_run_days"]:
+        return False, f"An event can have at most {ctx.cfg['max_run_days']} days. Nothing was changed."
+    spec = events.spec_from_run(ctx.db, run, ctx.cfg, ctx.grid)
+    plan = None
+    if added:
+        template = {k: v for k, v in (spec["days"][0] if spec.get("days") else {}).items()
+                    if k in ("first_start", "last_start", "slot_minutes")}
+        new_spec = {k: v for k, v in spec.items() if k not in ("days", "announce")}
+        new_spec.update(template, days=[{"date": d} for d in added])
+        plan, errors = events.resolve(new_spec, ctx.cfg, ctx.grid, ctx.db, ctx.now())
+        if errors:
+            return False, "Could not add those days:\n" + "\n".join(f"• {e}" for e in errors[:6])
+    dropped = ctx.db.remove_days(run["id"], remove) if remove else 0
+    if plan:
+        ctx.db.add_days(run["id"], plan.slots, plan.cutoffs)
+    if run["spec"]:                                   # keep the stored spec in step with the days
+        kept = [d for d in spec.get("days", []) if d.get("date") in remaining or d.get("date") not in current]
+        spec["days"] = sorted(kept + (plan.spec["days"] if plan else []), key=lambda d: d["date"])
+        ctx.db.set_spec(run["id"], spec)
+    bits = []
+    if added:
+        bits.append(f"added {len(added)} day(s)")
+    if remove:
+        bits.append(f"removed {len(remove)} day(s)" + (f" and dropped {dropped} signed-up slot(s)" if dropped else ""))
+    note = ""
+    if added and run["status"] == "closed":
+        note = " The event is closed: move one of the new days' cutoffs to reopen it."
+    return True, "Done: " + " and ".join(bits) + "." + note
+
+
+def delete_event(ctx, run):
+    name = run["name"]
+    ctx.db.delete_run(run["id"])
+    return (f"**{name}** was deleted. Its announcement and any party threads in Discord are still there; "
+            "delete them by hand if you want them gone.")
+
+
 # ---------------------------------------------------------------- the panel
 
 def render(ctx, run, selected, notice=""):
@@ -151,7 +222,12 @@ class RunEditView(discord.ui.View):
         self.cutoff_button.callback = self.change_cutoff
         self.details_button = discord.ui.Button(label="Edit details", style=discord.ButtonStyle.secondary, row=2)
         self.details_button.callback = self.edit_details_modal
-        for item in (self.day_select, self.toggle, self.close_day_button, self.cutoff_button, self.details_button):
+        self.days_button = discord.ui.Button(label="Change days", style=discord.ButtonStyle.secondary, row=2)
+        self.days_button.callback = self.change_days_modal
+        self.delete_button = discord.ui.Button(label="Delete event", style=discord.ButtonStyle.danger, row=3)
+        self.delete_button.callback = self.ask_delete
+        for item in (self.day_select, self.toggle, self.close_day_button, self.cutoff_button, self.days_button,
+                     self.details_button, self.delete_button):
             self.add_item(item)
         self.sync()
 
@@ -161,6 +237,11 @@ class RunEditView(discord.ui.View):
 
     def row(self):
         return self.ctx.db.run_day(self.run_id, self.day)
+
+    def refresh_days(self):
+        """Rebuild the day dropdown after days were added or removed."""
+        rows = self.ctx.db.run_days(self.run_id)
+        self.day_select.options = [discord.SelectOption(label=day_label(r["day"]), value=r["day"]) for r in rows[:25]]
 
     def sync(self):
         run, ctx = self.run, self.ctx
@@ -211,6 +292,13 @@ class RunEditView(discord.ui.View):
     async def edit_details_modal(self, interaction):
         await interaction.response.send_modal(DetailsModal(self))
 
+    async def change_days_modal(self, interaction):
+        await interaction.response.send_modal(DaysModal(self))
+
+    async def ask_delete(self, interaction):
+        confirm = ConfirmDeleteView(self)
+        await interaction.response.edit_message(content=confirm.text(), view=confirm)
+
 
 def _day_state_plain(ctx, run, row):
     """Plain text for a dropdown (Discord timestamps do not render inside dropdowns)."""
@@ -255,6 +343,67 @@ class DetailsModal(discord.ui.Modal):
         v = self.owner
         ok, text = edit_details(v.ctx, v.run, self.name.value, self.size.value if self.size else None)
         await v.redraw(interaction, text if not ok else "Saved.")
+
+
+class DaysModal(discord.ui.Modal):
+    def __init__(self, view):
+        super().__init__(title="Change the days")
+        self.owner = view
+        ctx = view.ctx
+        self.add = _input("Add days", "", "2026-11-09 to 2026-11-11, 2026-11-14", max_length=200)
+        rows = ctx.db.run_days(view.run_id)[:25]
+        self.remove = discord.ui.Select(
+            min_values=0, max_values=len(rows), required=False,
+            options=[discord.SelectOption(label=day_label(r["day"]), value=r["day"]) for r in rows])
+        self.add_item(discord.ui.Label(text="Add days", component=self.add,
+                                       description="Dates or ranges, separated by commas. They get the first day's "
+                                                   "times and the default cutoff."))
+        self.add_item(discord.ui.Label(text="Remove days", component=self.remove,
+                                       description="Not possible for a day that was exported or has parties."))
+
+    async def on_submit(self, interaction):
+        v = self.owner
+        ok, text = change_days(v.ctx, v.run, self.add.value, list(self.remove.values))
+        if ok:
+            rows = v.ctx.db.run_days(v.run_id)
+            if v.day not in {r["day"] for r in rows}:
+                v.day = rows[0]["day"]
+            v.refresh_days()
+        await v.redraw(interaction, text)
+
+
+class ConfirmDeleteView(discord.ui.View):
+    """Deleting is permanent, so it is its own step."""
+
+    def __init__(self, owner):
+        super().__init__(timeout=300)
+        self.owner = owner
+        yes = discord.ui.Button(label="Yes, delete it", style=discord.ButtonStyle.danger)
+        yes.callback = self.confirm
+        no = discord.ui.Button(label="Keep it", style=discord.ButtonStyle.secondary)
+        no.callback = self.cancel
+        self.add_item(yes)
+        self.add_item(no)
+
+    def text(self):
+        ctx, run = self.owner.ctx, self.owner.run
+        players, parties = ctx.db.run_counts(run["id"])
+        return (f"Delete **{run['name']}** for good? This removes its {len(ctx.db.run_days(run['id']))} days, "
+                f"{players} signed-up players' signups and {parties} parties, including those parties' ratings and "
+                "feedback. It cannot be undone.")
+
+    async def interaction_check(self, interaction):
+        return await self.owner.interaction_check(interaction)
+
+    async def confirm(self, interaction):
+        text = delete_event(self.owner.ctx, self.owner.run)
+        self.stop()
+        self.owner.stop()
+        await interaction.response.edit_message(content=text, view=None)
+
+    async def cancel(self, interaction):
+        self.stop()
+        await self.owner.redraw(interaction)
 
 
 # ---------------------------------------------------------------- /run edit
