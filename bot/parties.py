@@ -11,7 +11,7 @@ import discord
 
 from .config import ROLES, role_label
 from .db import parse_iso, split_roles
-from .services import checkpoint_label, server_setting
+from .services import checkpoint_label, find_channel, server_setting
 from .votes import slot_end
 
 log = logging.getLogger("raidbot")
@@ -205,9 +205,10 @@ async def apply_swap(ctx, guild_id, party_id, out_id, in_id, in_role, actor_id, 
     from . import confirmations
     problems += [p for p in [await confirmations.thread_prompt(ctx, party["slot_id"], ping=[str(in_id)])] if p]
     channel_id = server_setting(ctx, guild_id, "parties_channel_id")
-    channel = await ctx.get_channel(int(channel_id)) if channel_id and ctx.get_channel else None
+    channel = await find_channel(ctx, channel_id)
     if channel is None:
-        problems.append("No parties channel found, so <@%s> was not notified. Tell them yourself." % out_id)
+        problems.append("No parties channel found (not set, deleted, or I lost access), so <@%s> was not notified. "
+                        "Tell them yourself." % out_id)
     else:
         try:
             await channel.send(

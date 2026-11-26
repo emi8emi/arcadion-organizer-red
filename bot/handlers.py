@@ -20,7 +20,7 @@ from . import heatmap
 from .config import ROOT, role_label
 from .db import DraftConflict, DuplicateRun, parse_iso
 from .grid import parse_date, parse_local_datetime
-from .services import (snapshot_note, cutoff_of, day_label, day_state, day_summary_lines, limits_text, locked_prog_lines, open_days,
+from .services import (find_channel, snapshot_note, cutoff_of, day_label, day_state, day_summary_lines, limits_text, locked_prog_lines, open_days,
                        profile_text, server_setting, signup_open, tick_lines, valid_timezone, validate_limits)
 from .snapshots import ensure_snapshot
 from .solver_io import DraftError, build_signups, fingerprint, import_draft, is_note
@@ -116,9 +116,13 @@ async def submit_event(ctx, interaction, spec):
     lines = ["Created the event as a draft.", events.describe(plan)]
     if plan.open_at_utc is None:
         lines.append("Use /run open to start signups.")
-    if not server_setting(ctx, interaction.guild_id, "reminder_channel_id"):
+    reminder = server_setting(ctx, interaction.guild_id, "reminder_channel_id")
+    if not reminder:
         lines.append("⚠ No reminder channel is set (use /settings set), "
                      "so the bot will not remind organizers to run /draft export after each cutoff.")
+    elif await find_channel(ctx, reminder) is None:
+        lines.append("⚠ The reminder channel was deleted or I cannot see it, so the bot cannot remind organizers to "
+                     "run /draft export. Set it again with /settings set.")
     await say(interaction, "\n".join(lines)[:1990])
     return True
 
@@ -473,9 +477,10 @@ async def draft_confirm(ctx, interaction, name=None, day=None):
                          (" (it is already approved: players are asked in the slot threads)." if approved else
                           ". Import one with /draft import."))
     channel_id = server_setting(ctx, interaction.guild_id, "parties_channel_id")
-    channel = await ctx.get_channel(int(channel_id)) if channel_id and ctx.get_channel else None
+    channel = await find_channel(ctx, channel_id)
     if channel is None:
-        return await say(interaction, "I need the parties channel to ask people (use /settings set).")
+        return await say(interaction, "I need the parties channel to ask people, but it is not set or I cannot "
+                                      "find it any more (deleted, or I lost access). Use /settings set parties_channel.")
     await interaction.response.defer(ephemeral=True)
     asked, pinged, errors = await cf.post_draft_prompts(ctx, run, day_key, channel)
     lines = [f"Asked for confirmation for **{run['name']}**, {day_label(day_key)}: {asked} slot(s), "
@@ -534,9 +539,9 @@ async def draft_approve(ctx, interaction, name=None, day=None):
     if not channel_id:
         return await say(interaction, head + " No parties channel is set (use /settings set), so nothing was posted. "
                                               "Players see their party under /myschedule.")
-    channel = await ctx.get_channel(int(channel_id)) if ctx.get_channel else None
+    channel = await find_channel(ctx, channel_id)
     if channel is None:
-        return await say(interaction, head + f" I could not find channel {channel_id}, so nothing was posted. "
+        return await say(interaction, head + f" I could not find channel {channel_id} (deleted, or I lost access), so nothing was posted. "
                                               "Players see their party under /myschedule. Run /draft approve again "
                                               "after fixing the parties channel with /settings set to post them.")
     posted, errors = await post_day_parties(ctx, run, day_key, channel)
@@ -622,6 +627,23 @@ def settings_lines(ctx, guild_id):
     return lines
 
 
+async def settings_problems(ctx, interaction):
+    """Warnings for settings that point at something that is gone: a deleted channel, a deleted role."""
+    out = []
+    for key, label in SETTING_LABELS.items():
+        value = server_setting(ctx, interaction.guild_id, key)
+        if not value:
+            continue
+        if key == "organizer_role_id":
+            guild = getattr(interaction, "guild", None)
+            if guild is not None and guild.get_role(int(value)) is None:
+                out.append(f"⚠ **{label}** points at a role that no longer exists. Set it again with /settings set.")
+        elif await find_channel(ctx, value) is None:
+            out.append(f"⚠ **{label}** points at a channel that was deleted or that I cannot see. "
+                       "Set it again with /settings set (or /settings clear).")
+    return out
+
+
 async def require_manage_server(interaction):
     perms = interaction.user.guild_permissions
     if perms.manage_guild or perms.administrator:
@@ -633,7 +655,9 @@ async def require_manage_server(interaction):
 async def settings_show(ctx, interaction):
     if not await require_organizer(ctx, interaction):
         return
-    await say(interaction, "\n".join(["**Server settings**", *settings_lines(ctx, interaction.guild_id)]))
+    lines = ["**Server settings**", *settings_lines(ctx, interaction.guild_id)]
+    lines += await settings_problems(ctx, interaction)
+    await say(interaction, "\n".join(lines))
 
 
 async def settings_set(ctx, interaction, organizer_role=None, reminder_channel=None, parties_channel=None,

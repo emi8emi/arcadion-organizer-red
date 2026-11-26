@@ -1,4 +1,5 @@
 """Shared pieces for command handlers and the signup views."""
+import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Callable, Optional
@@ -11,8 +12,24 @@ from .db import DB, parse_iso, split_roles
 from .grid import GridConfig
 from .characters import characters_line
 
+log = logging.getLogger("raidbot")
+
 MAX_PER_DAY = 8
 MAX_PER_RUN = 99
+
+
+async def find_channel(ctx, channel_id, warn=True):
+    """The channel or thread with this id, or None. None means: not set, deleted, or the bot cannot see it
+    (Discord answers 'not found' or 'forbidden' for those, which `ctx.get_channel` raises). Never raises, so a
+    deleted channel can never crash a command; callers decide what to tell the organizer."""
+    if ctx.get_channel is None or not channel_id:
+        return None
+    try:
+        return await ctx.get_channel(int(channel_id))
+    except (discord.HTTPException, ValueError, TypeError):
+        if warn:
+            log.warning("channel %s no longer exists or is not visible to the bot", channel_id)
+        return None
 
 
 def server_setting(ctx, guild_id, key):

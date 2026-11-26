@@ -8,7 +8,7 @@ import discord
 
 from .config import ROLES, role_label
 from .db import parse_iso
-from .services import checkpoint_label, day_label
+from .services import checkpoint_label, day_label, find_channel
 from .votes import slot_end, window_closes
 from .views import RatePromptView
 from .party_views import PartyActionsView
@@ -98,11 +98,15 @@ async def post_rating_prompts(ctx):
         if not parties:                                    # every party already got its own button when it ended
             ctx.db.mark_rating_posted(slot["id"], now)
             continue
+        thread = await find_channel(ctx, slot["thread_id"])
+        if thread is None:                                 # deleted, archived out of reach, or no access: stop trying
+            log.warning("thread %s for slot %s is gone; no rating prompt (players can use /rate)",
+                        slot["thread_id"], slot["slot_key"])
+            for p in parties:
+                ctx.db.mark_party_rating_posted(p["id"], now)
+            ctx.db.mark_rating_posted(slot["id"], now)
+            continue
         try:
-            thread = await ctx.get_channel(int(slot["thread_id"]))
-            if thread is None:
-                log.warning("thread %s for slot %s not found", slot["thread_id"], slot["slot_key"])
-                continue
             await thread.send("This slot has ended. Rate your party: press your party's button. "
                               "Ratings are private; nobody else sees what you pick.",
                               view=RatePromptView(parties))

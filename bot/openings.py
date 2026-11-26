@@ -7,7 +7,7 @@ import logging
 import discord
 
 from . import events
-from .services import cutoff_of, day_label, open_days, server_setting
+from .services import cutoff_of, day_label, find_channel, open_days, server_setting
 
 log = logging.getLogger("raidbot")
 

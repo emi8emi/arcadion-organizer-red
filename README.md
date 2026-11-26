@@ -104,6 +104,13 @@ See "What is not built yet".
 | `ALLOW_MAX_PER_RUN` | `1` shows the "Max parties per run" field in the Limits form (config key `enable_per_run_limit`); off by default |
 | `DEBUG_COMMANDS` | `1` registers the organizer `/debug` testing commands |
 
+**Deleted channels.** If a stored channel (parties, reminders, a slot thread) is deleted or the bot loses access to it,
+nothing crashes: `/draft confirm` and `/draft approve` say so (approve still saves the approval, players see their
+party under `/myschedule`), a swap tells the organizer to notify the leaver themselves, and `/settings show` marks the
+setting with a warning. Export reminders for a dead reminder channel are logged once (not every minute) and stay due, so
+they go out as soon as `/settings set` points at a working channel. A deleted slot thread stops its rating prompt after
+one log line; players can still use `/rate`.
+
 ### Running in several servers
 
 The bot works in any server it is invited to. Runs, the organizer role, the reminder channel and the parties
