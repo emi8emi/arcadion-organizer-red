@@ -5,15 +5,17 @@ reads the database), so tests can drive it with a fake clock. `send_due_reminder
 that talks to Discord.
 """
 import logging
+from types import SimpleNamespace
 from datetime import timedelta
 
 import discord
 
 from . import heatmap
 from .db import parse_iso
-from .services import day_label, server_setting
+from .services import day_label, find_channel, server_setting
 
 log = logging.getLogger("raidbot")
+_unreachable = set()          # reminder channels already reported as gone, so the log gets one line, not one a minute
 
 
 def due_reminders(db, now, cfg):
@@ -68,12 +70,13 @@ async def send_due_reminders(ctx, get_channel):
         if not channel_id:
             continue
         if guild_id not in channels:
-            try:
-                channels[guild_id] = await get_channel(int(channel_id))
-            except Exception:
-                channels[guild_id] = None
-            if channels[guild_id] is None:
-                log.warning("reminder channel %s of server %s not found; check /settings", channel_id, guild_id)
+            channels[guild_id] = await find_channel(SimpleNamespace(get_channel=get_channel), channel_id, warn=False)
+            if channels[guild_id] is None and (guild_id, channel_id) not in _unreachable:
+                _unreachable.add((guild_id, channel_id))
+                log.warning("reminder channel %s of server %s was deleted or is not visible; reminders are skipped "
+                            "until /settings set reminder_channel (/settings show lists the problem)", channel_id, guild_id)
+            elif channels[guild_id] is not None:
+                _unreachable.discard((guild_id, channel_id))
         channel = channels[guild_id]
         if channel is None:
             continue

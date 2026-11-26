@@ -12,6 +12,7 @@ from .config import ROOT
 from .db import DB
 from .grid import GridConfig
 from .posting import post_rating_prompts
+from .openings import open_scheduled
 from .reminders import send_due_reminders
 from .snapshots import take_due_snapshots
 from .panel import PanelButton
@@ -87,6 +88,10 @@ class RaidBot(discord.Client):
             await send_confirmation_reminders(self.ctx)                          # unconfirmed players, slot starting soon
         except Exception:
             log.exception("confirmation reminders failed")
+        try:
+            await open_scheduled(self.ctx)                                       # events whose open_at has passed
+        except Exception:
+            log.exception("scheduled opening failed")
         try:
             await send_due_reminders(self.ctx, self._get_channel)
         except Exception:
