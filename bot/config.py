@@ -37,6 +37,7 @@ DEFAULTS = {
     "solver_phase_cross_cost": 3,   # must equal phase_cross_cost in raid-solver/config.json
     "cutoff_time": "23:59",          # each day's signups close at this local time ...
     "cutoff_days_before": 1,         # ... this many days before the day (1 = the evening before)
+    "members_intent": False,         # MEMBERS_INTENT=1: read who holds the helper role (privileged intent, enable it in the Developer Portal)
     "reminder_channel_id": None,     # where the bot nags organizers to run /draft export
     "reminder_interval_minutes": 30,
     "dm_on_confirm": True,           # DM a player the party time and thread link when they press "I'll be there"
@@ -73,6 +74,8 @@ def load_config(path=None, env=None):
         cfg.update(json.loads(path.read_text()))
     if env.get("ORGANIZER_ROLE_ID"):
         cfg["organizer_role_id"] = int(env["ORGANIZER_ROLE_ID"])
+    if env.get("MEMBERS_INTENT"):
+        cfg["members_intent"] = env["MEMBERS_INTENT"].strip().lower() in ("1", "true", "yes", "on")
     if env.get("REMINDER_CHANNEL_ID"):
         cfg["reminder_channel_id"] = int(env["REMINDER_CHANNEL_ID"])
     if env.get("PARTIES_CHANNEL_ID"):

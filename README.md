@@ -101,6 +101,7 @@ See "What is not built yet".
 | `GUILD_ID` | your **home server**: commands sync to it only (instant) and the three defaults below belong to it. Leave it empty to run in every server (commands sync globally, up to an hour) |
 | `ORGANIZER_ROLE_ID`, `REMINDER_CHANNEL_ID`, `PARTIES_CHANNEL_ID` | defaults for the home server (`GUILD_ID`) only; `/settings` sets them per server without editing files. Without `GUILD_ID` they are ignored (the bot warns at startup) |
 | `FFLOGS_CLIENT_ID`, `FFLOGS_CLIENT_SECRET` | FFLogs API client, needed for character lookups and prog scoring |
+| `MEMBERS_INTENT` | `1` lets the bot read who holds a fight's helper role (so they count as helpers). It needs the **Server Members Intent** switched on for the bot in the Discord Developer Portal first, otherwise the bot fails to start. Off by default; granted helpers work without it |
 | `ALLOW_MAX_PER_RUN` | `1` shows the "Max parties per run" field in the Limits form (config key `enable_per_run_limit`); off by default |
 | `DEBUG_COMMANDS` | `1` registers the organizer `/debug` testing commands |
 
@@ -138,7 +139,7 @@ Nothing is solved automatically: at each cutoff the bot nags the organizers unti
 | Step | Who | What |
 | --- | --- | --- |
 | 1 | organizer | `/run create` opens a private **guided form** with a live preview: **Basics** (name, fight, dates), tick the days of the range, **Times** (first and last slot start, slot length), **Cutoff** (time, days before, timezone), a per-day menu to change one day's window, slot length or exact cutoff, and **Announce** (channel, role to ping, message, when to open by itself). Nothing is saved until **Create event**, which stays disabled while the preview lists problems. `/run create` with a JSON file attached does the same from an [event spec](#event-spec-json); `/run spec` sends an existing event's spec back as a file. The result is a draft run with its slot grid and one cutoff per day (default: `cutoff_time` (`23:59`) `cutoff_days_before` (`1`) days earlier, so Monday closes Sunday 23:59). A day already past its cutoff when the run opens starts closed. Creating is refused if a cutoff is not before that day's first slot. |
-| 2 | organizer | `/helper grant @person` for each helper (once per fight). `/helper support @person helpers:2` for players who should be seated with company (see below). |
+| 2 | organizer | `/helper`: one panel to grant helpers, set the fight's helper role and flag players who need company (see below). |
 | 3 | organizer | `/run edit` opens a private **panel** for an event (a picker first when several are live): pick a day, then **Open event** / **Close event**, **Close this day now**, **Change cutoff** (also reopens a closed day or event) and **Change days** (add dates or ranges, which copy the first day's times and the default cutoff; remove days, refused for a day that was exported or has parties; removed days drop their signups), **Edit details** (name, and the group size of an availability event) and **Delete event** (asks first; removes the days, signups, parties and their ratings; the announcement and party threads in Discord stay). Several events can be open at once. |
 | 4 | players | `/availability`: pick roles (the **Roles** button opens a menu where you tick every role you can play; until you pick some the menu shows a red warning and the player is not placed in any party), prog checkpoint (shown prominently, since it changes), then a day and its slots. Each day shows when it closes; a closed day is read-only. The **Limits** button sets max per day, max per run and how many checkpoints lower they accept. `/limits` and `/myschedule` show the same. Roles, prog and limits stay editable while any day is open. |
 | 5 | organizer | `/run status [day]`: each day's state (open, closed, exported) and cutoff, plus ticks per slot split into the seven roles (MT, OT, RG, SH, ML, RN, CS) with a marker where the role mix could fill a party. |
@@ -193,15 +194,20 @@ will play. One prog point per player is still shared by all events (per-fight pr
 * The solver is unchanged and knows nothing about confirmations, so a re-run may move someone who had confirmed.
   Their confirmation stays valid only if they land in the same slot.
 
-### Pairing a player with helpers
+### Helpers and pairing a player with them
 
-There is no skill rating yet, so "good player" is inferred: a granted **helper**, or anyone whose prog is above the
-flagged player's (and who does not need support themselves). `/helper support @person helpers:2` makes the solver
-seat that player in a party with at least that many of them; `required:true` turns the preference into a hard rule
-(the player is left out when it cannot be met), `/helper unsupport` clears it and `/helper list` shows helpers and
-flagged players. It is stored per fight (`support_needs`) and exported as `players[].needs_support`, so the solver
-needs the matching `needs_support` support (see its README). Like helper grants, it is not snapshotted: change it,
-export again. The solver's `max_helpers_per_party` still applies, so needs above it are met with higher-prog players.
+`/helper` opens one private panel (like `/run edit`) for a fight: pick the fight, choose players to **make helpers**,
+pick the fight's **helper role** (everyone holding that Discord role counts as a helper for it, per fight and
+per server; this needs `MEMBERS_INTENT=1`, see Run it), remove a helper or a support need from the dropdown, or press
+**Needs support…** to flag a player.
+
+There is no skill rating yet, so "good player" is inferred: a helper, or anyone whose prog is above the flagged
+player's (and who does not need support themselves). A flagged player is seated, by the solver, with that many of them
+(1-4 in the form). *Preferred* is a soft rule (the solver tries its best); *Required* is hard (the player is left out
+when it cannot be met). It is stored per fight (`support_needs`, `helper_roles`) and exported as `players[].needs_support`
+and the helper flag, so the solver needs its matching `needs_support` support (see its README). Like helper grants,
+none of it is snapshotted: change it, export again. The solver's `max_helpers_per_party` still applies, so needs above
+it are met with higher-prog players.
 
 ### Snapshots: a day's signups are frozen at its cutoff
 
@@ -380,7 +386,7 @@ the file now) and `/debug complete` (mark approved slots as ended so voting can 
 | Who | Command |
 | --- | --- |
 | players | `/availability` (roles, prog, slots), `/limits`, `/myschedule`, `/rate`, `/character add \| verify \| list \| remove` |
-| organizers | `/run create \| edit \| spec \| status`, `/helper grant \| revoke \| support \| unsupport \| list`, `/draft export \| import \| confirm \| approve`, `/party import \| dashboard`, `/feedback summary \| player`, `/votes summary`, `/settings show \| set \| clear` (incl. the user panel channel) |
+| organizers | `/run create \| edit \| spec \| status`, `/helper`, `/draft export \| import \| confirm \| approve`, `/party import \| dashboard`, `/feedback summary \| player`, `/votes summary`, `/settings show \| set \| clear` (incl. the user panel channel) |
 | organizers (needs `DEBUG_COMMANDS=1`) | `/debug complete \| setprog \| score \| sync_checkpoints` |
 
 ## The fingerprint check

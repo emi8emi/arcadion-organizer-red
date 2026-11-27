@@ -40,9 +40,12 @@ def build_ctx(cfg):
 
 class RaidBot(discord.Client):
     def __init__(self, ctx, guild_id=None):
-        super().__init__(intents=discord.Intents.default())      # slash commands need no privileged intents
+        intents = discord.Intents.default()                      # slash commands need no privileged intents
+        intents.members = bool(ctx.cfg.get("members_intent"))    # opt-in: lets the bot read who holds the helper role
+        super().__init__(intents=intents)
         self.ctx, self.guild_id = ctx, guild_id
         ctx.get_channel = self._get_channel
+        ctx.role_members = self._role_members if intents.members else None
         self.tree = app_commands.CommandTree(self)
         register(self.tree, ctx)
         self.tree.on_error = self.on_tree_error
@@ -63,6 +66,11 @@ class RaidBot(discord.Client):
         self.add_dynamic_items(RatePartyButton, PartyEndedButton, PartyEditButton, WhySwappedButton,
                                ConfirmButton, CancelButton, PanelButton)           # the thread buttons keep working after a restart
         self.reminder_loop.start()
+
+    def _role_members(self, guild_id, role_id):
+        guild = self.get_guild(int(guild_id))
+        role = guild.get_role(int(role_id)) if guild else None
+        return [m.id for m in role.members] if role else None
 
     async def _get_channel(self, channel_id):
         return self.get_channel(channel_id) or await self.fetch_channel(channel_id)

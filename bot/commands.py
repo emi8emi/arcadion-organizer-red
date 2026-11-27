@@ -6,7 +6,7 @@ import discord
 from discord import app_commands
 from zoneinfo import available_timezones
 
-from . import character_handlers, handlers, run_edit
+from . import character_handlers, handlers, helper_panel, run_edit
 
 
 # 1. Cache the sorted list of timezones globally at startup 
@@ -137,43 +137,6 @@ class FeedbackGroup(app_commands.Group):
         await handlers.feedback_player(self.ctx, interaction, player)
 
 
-class HelperGroup(app_commands.Group):
-    def __init__(self, ctx):
-        super().__init__(name="helper", description="Organizers: helper status", guild_only=True)
-        self.ctx = ctx
-
-    @app_commands.command(name="grant", description="Mark someone as a helper for a fight")
-    @app_commands.describe(member="Who", content="The fight (optional while there is only one)")
-    async def grant(self, interaction: discord.Interaction, member: discord.Member,
-                    content: Optional[str] = None):
-        await handlers.helper_grant(self.ctx, interaction, member, content)
-
-    @app_commands.command(name="revoke", description="Remove helper status for a fight")
-    @app_commands.describe(member="Who", content="The fight (optional while there is only one)")
-    async def revoke(self, interaction: discord.Interaction, member: discord.Member,
-                     content: Optional[str] = None):
-        await handlers.helper_revoke(self.ctx, interaction, member, content)
-
-    @app_commands.command(name="support", description="Seat a player with helpers or higher-prog players")
-    @app_commands.describe(member="Who needs company", helpers="How many helpers or higher-prog players (1-7)",
-                           required="Hard rule: leave them out if it cannot be met (default: only a preference)",
-                           content="The fight (optional while there is only one)")
-    async def support(self, interaction: discord.Interaction, member: discord.Member, helpers: int,
-                      required: bool = False, content: Optional[str] = None):
-        await handlers.helper_support(self.ctx, interaction, member, helpers, required, content)
-
-    @app_commands.command(name="unsupport", description="Remove a player's support need")
-    @app_commands.describe(member="Who", content="The fight (optional while there is only one)")
-    async def unsupport(self, interaction: discord.Interaction, member: discord.Member,
-                        content: Optional[str] = None):
-        await handlers.helper_unsupport(self.ctx, interaction, member, content)
-
-    @app_commands.command(name="list", description="Helpers and players who need support")
-    @app_commands.describe(content="The fight (optional while there is only one)")
-    async def list(self, interaction: discord.Interaction, content: Optional[str] = None):
-        await handlers.helper_list(self.ctx, interaction, content)
-
-
 class DebugGroup(app_commands.Group):
     def __init__(self, ctx):
         super().__init__(name="debug", description="Organizers: testing helpers", guild_only=True)
@@ -279,7 +242,12 @@ class CharacterGroup(app_commands.Group):
 def register(tree, ctx):
     tree.add_command(RunGroup(ctx))
     tree.add_command(DraftGroup(ctx))
-    tree.add_command(HelperGroup(ctx))
+    @tree.command(name="helper", description="Organizers: helpers, the helper role and players who need support")
+    @app_commands.guild_only()
+    @app_commands.describe(content="The fight (optional while there is only one)")
+    async def helper(interaction: discord.Interaction, content: Optional[str] = None):
+        await helper_panel.start(ctx, interaction, content)
+
     tree.add_command(PartyGroup(ctx))
     tree.add_command(VotesGroup(ctx))
     tree.add_command(FeedbackGroup(ctx))

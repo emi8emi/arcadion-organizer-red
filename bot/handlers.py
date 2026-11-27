@@ -53,6 +53,15 @@ def is_organizer(ctx, user):
     return bool(role_id) and any(getattr(r, "id", None) == int(role_id) for r in getattr(user, "roles", []))
 
 
+def role_helper_ids(ctx, run):
+    """Ids of everyone holding the fight's helper role in the run's server (empty when none is set or the bot cannot
+    read role members, see the Server Members Intent in the README)."""
+    role_id = ctx.db.helper_role(run["fight_id"], run["guild_id"])
+    if role_id is None or ctx.role_members is None:
+        return set()
+    return {str(d) for d in (ctx.role_members(run["guild_id"], role_id) or ())}
+
+
 async def require_organizer(ctx, interaction):
     if is_organizer(ctx, interaction.user):
         return True
@@ -389,7 +398,7 @@ async def draft_export(ctx, interaction, name=None, day=None, force=False):
                                       "anyway (the draft goes stale if anyone changes their signup afterwards).")
 
     _ensure_snapshots(ctx, run)
-    data, warnings = build_signups(ctx.db, run, ctx.cfg, day_key, ctx.now())
+    data, warnings = build_signups(ctx.db, run, ctx.cfg, day_key, ctx.now(), role_helper_ids(ctx, run))
     late, warnings = _split_warnings(warnings)
     if not data["players"]:
         lines = [f"Nobody is ready to play on {day_label(day_key)} (no one ticked slots with roles and prog set), "
@@ -426,7 +435,7 @@ def _day_of_draft(ctx, run, draft):
     exported = sorted((r for r in ctx.db.run_days(run["id"]) if r["exported_utc"]),
                       key=lambda r: r["exported_utc"], reverse=True)
     for row in exported:
-        data, _ = build_signups(ctx.db, run, ctx.cfg, row["day"], ctx.now())
+        data, _ = build_signups(ctx.db, run, ctx.cfg, row["day"], ctx.now(), role_helper_ids(ctx, run))
         if fingerprint(data) == draft.get("input_fingerprint"):
             return row["day"]
     return exported[0]["day"] if exported else None      # none match: report staleness for the latest export
@@ -455,7 +464,7 @@ async def draft_import(ctx, interaction, draft_file, name=None, day=None):
     if day_key is None and isinstance(draft, dict):
         day_key = _day_of_draft(ctx, run, draft)
     try:
-        s = import_draft(ctx.db, run, draft, ctx.cfg, day_key, ctx.now())
+        s = import_draft(ctx.db, run, draft, ctx.cfg, day_key, ctx.now(), role_helper_ids(ctx, run))
     except DraftError as e:
         return await say(interaction, f"Draft refused: {e}")
     except DraftConflict:
@@ -1007,68 +1016,3 @@ def _fight_for(ctx, content):
         return ctx.db.find_fight(content)
     fights = ctx.db.fights()
     return fights[0] if len(fights) == 1 else None
-
-
-async def helper_grant(ctx, interaction, member, content=None):
-    if not await require_organizer(ctx, interaction):
-        return
-    fight = _fight_for(ctx, content)
-    if fight is None:
-        return await say(interaction, "Which content? Give its name.")
-    ctx.db.grant_helper(fight["id"], member.id, interaction.user.id, ctx.now())
-    await say(interaction, f"{member.display_name} is now a helper for {fight['name']}.")
-
-
-async def helper_revoke(ctx, interaction, member, content=None):
-    if not await require_organizer(ctx, interaction):
-        return
-    fight = _fight_for(ctx, content)
-    if fight is None:
-        return await say(interaction, "Which content? Give its name.")
-    if ctx.db.revoke_helper(fight["id"], member.id):
-        await say(interaction, f"{member.display_name} is no longer a helper for {fight['name']}.")
-    else:
-        await say(interaction, f"{member.display_name} was not a helper for {fight['name']}.")
-
-
-async def helper_support(ctx, interaction, member, helpers, required=False, content=None):
-    """Seat this player only with `helpers` helpers or higher-prog players (soft; `required` makes it a hard rule)."""
-    if not await require_organizer(ctx, interaction):
-        return
-    fight = _fight_for(ctx, content)
-    if fight is None:
-        return await say(interaction, "Which content? Give its name.")
-    if not 1 <= helpers <= 7:
-        return await say(interaction, "Helpers must be between 1 and 7.")
-    ctx.db.set_support_need(fight["id"], member.id, helpers, required, interaction.user.id, ctx.now())
-    cap = ctx.cfg.get("max_helpers_per_party")
-    note = (f"\nThe solver caps helpers per party at {cap}, so the rest has to come from players with a higher prog."
-            if cap is not None and helpers > cap else "")
-    await say(interaction, f"{member.display_name} will be seated with {helpers} helper(s) or higher-prog player(s) for "
-                           f"{fight['name']} ({'required: left out if it cannot be met' if required else 'preferred: the solver tries its best'})."
-                           + note + "\nExport again to send it to the solver.")
-
-
-async def helper_unsupport(ctx, interaction, member, content=None):
-    if not await require_organizer(ctx, interaction):
-        return
-    fight = _fight_for(ctx, content)
-    if fight is None:
-        return await say(interaction, "Which content? Give its name.")
-    if ctx.db.clear_support_need(fight["id"], member.id):
-        await say(interaction, f"{member.display_name} no longer needs support for {fight['name']}.")
-    else:
-        await say(interaction, f"{member.display_name} had no support need for {fight['name']}.")
-
-
-async def helper_list(ctx, interaction, content=None):
-    if not await require_organizer(ctx, interaction):
-        return
-    fight = _fight_for(ctx, content)
-    if fight is None:
-        return await say(interaction, "Which content? Give its name.")
-    helpers, needs = sorted(ctx.db.helper_ids(fight["id"])), ctx.db.support_needs(fight["id"])
-    lines = [f"**{fight['name']}**", "Helpers: " + (", ".join(f"<@{d}>" for d in helpers) or "nobody")]
-    lines += [f"Needs support: <@{d}> · {n['helpers']} helper(s)" + (" · required" if n["required"] else "")
-              for d, n in sorted(needs.items())] or ["Needs support: nobody"]
-    await say(interaction, "\n".join(lines))

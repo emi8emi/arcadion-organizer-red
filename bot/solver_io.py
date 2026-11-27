@@ -54,7 +54,7 @@ def _player_sort_key(discord_id):
     return (len(discord_id), discord_id)
 
 
-def build_signups(db, run, cfg, day=None, now=None):
+def build_signups(db, run, cfg, day=None, now=None, extra_helpers=()):
     """Current signups for `run` as solver input. Returns (data, warnings).
 
     With `day` ('2026-11-02') only that day's slots and the players who ticked them are exported, and two
@@ -77,7 +77,7 @@ def build_signups(db, run, cfg, day=None, now=None):
     now = now or datetime.now(timezone.utc)
     checkpoints = db.checkpoints(run["fight_id"])
     pos = phase_positions(checkpoints, cfg["solver_phase_cross_cost"])
-    helpers = db.helper_ids(run["fight_id"])
+    helpers = db.helper_ids(run["fight_id"]) | {str(d) for d in extra_helpers}     # grants + holders of the helper role
     needs = db.support_needs(run["fight_id"])
     unmatched = db.previous_unmatched(run, day)
     played = db.played_counts(run["id"], day) if day else {}
@@ -147,7 +147,7 @@ def build_signups(db, run, cfg, day=None, now=None):
     return data, warnings
 
 
-def import_draft(db, run, draft, cfg, day=None, now=None):
+def import_draft(db, run, draft, cfg, day=None, now=None, extra_helpers=()):
     """Validate a solver draft against the current signups and store it as 'draft' parties.
 
     With `day`, the draft is checked against that day's export and replaces only that day's draft parties.
@@ -160,7 +160,7 @@ def import_draft(db, run, draft, cfg, day=None, now=None):
     if draft.get("version") != 1:
         raise DraftError(f"Unsupported draft version {draft.get('version')!r}; this bot reads version 1.")
 
-    data, warnings = build_signups(db, run, cfg, day, now)
+    data, warnings = build_signups(db, run, cfg, day, now, extra_helpers)
     current = fingerprint(data)
     if draft["input_fingerprint"] != current:
         scope = f" for {day}" if day else ""

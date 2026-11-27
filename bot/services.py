@@ -53,6 +53,7 @@ class Ctx:
     lodestone: object = None
     fflogs: object = None
     get_channel: Optional[Callable] = None        # async (channel_id) -> channel or thread; set by the bot
+    role_members: Optional[Callable] = None       # (guild_id, role_id) -> ids of the role's members, or None when unknown
 
 
 def day_label(day):
