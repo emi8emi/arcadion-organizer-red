@@ -6,7 +6,7 @@ import discord
 from discord import app_commands
 from zoneinfo import available_timezones
 
-from . import character_handlers, handlers
+from . import character_handlers, handlers, run_edit
 
 
 # 1. Cache the sorted list of timezones globally at startup 
@@ -50,26 +50,10 @@ class RunGroup(app_commands.Group):
     async def spec(self, interaction: discord.Interaction, name: Optional[str] = None):
         await handlers.run_spec(self.ctx, interaction, name)
 
-    @app_commands.command(name="open", description="Open a run for signups")
-    @app_commands.describe(name="Run name (default: the newest run)")
-    async def open(self, interaction: discord.Interaction, name: Optional[str] = None):
-        await handlers.run_open(self.ctx, interaction, name)
-
-    @app_commands.command(name="close", description="Close signups for one day now, or for every remaining day")
-    @app_commands.describe(name="Run name (default: the newest run)",
-                           day="Optional: only this day, like 2026-11-02 (default: all remaining days)")
-    async def close(self, interaction: discord.Interaction, name: Optional[str] = None,
-                    day: Optional[str] = None):
-        await handlers.run_close(self.ctx, interaction, name, day)
-
-    @app_commands.command(name="extend", description="Move one day's signup cutoff (reopens a closed day)")
-    @app_commands.autocomplete(timezone=timezone_autocomplete)
-    @app_commands.describe(day="The day, like 2026-11-02", new_cutoff="New cutoff, like 2026-11-01 23:59",
-                           name="Run name (default: the newest run)",
-                           timezone="Optional: Iana timezone the new cutoff is in (default: the grid timezone)")
-    async def extend(self, interaction: discord.Interaction, day: str, new_cutoff: str,
-                     name: Optional[str] = None, timezone: Optional[str] = None):
-        await handlers.run_extend(self.ctx, interaction, day, new_cutoff, name, timezone)
+    @app_commands.command(name="edit", description="Open or close an event, close a day, move a cutoff, rename it")
+    @app_commands.describe(name="Run name (default: the newest run, or a picker when several are live)")
+    async def edit(self, interaction: discord.Interaction, name: Optional[str] = None):
+        await run_edit.start(self.ctx, interaction, name)
 
     @app_commands.command(name="status", description="Live signup heatmap: ticks per slot, split by role")
     @app_commands.describe(name="Run name (default: the newest run)", day="Optional: only this day, like 2026-11-02")

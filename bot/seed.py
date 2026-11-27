@@ -89,7 +89,7 @@ def seed(db, cfg, run, *, count=None, you="melee", prog=0, helpers=1, slots=None
 
     warnings, skipped = [], []
     if run["status"] == "draft":
-        warnings.append("The run is still a draft: /run open lets real players sign up (the fakes are saved anyway).")
+        warnings.append("The run is still a draft: /run edit (Open event) lets real players sign up (the fakes are saved anyway).")
     for day in sorted(by_day):
         row = db.run_day(run["id"], day)
         if row is not None and row["snapshot_utc"]:

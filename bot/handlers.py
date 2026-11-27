@@ -12,7 +12,7 @@ from zoneinfo import available_timezones
 import discord
 
 from . import characters as ch
-from . import events, openings
+from . import events, openings, run_edit
 from . import confirmations as cf
 from . import progscore
 from .fflogs import FFLogsError
@@ -132,7 +132,7 @@ async def submit_event(ctx, interaction, spec):
         return False
     lines = ["Created the event as a draft.", events.describe(plan)]
     if plan.open_at_utc is None:
-        lines.append("Use /run open to start signups.")
+        lines.append("Use /run edit to open it for signups.")
     reminder = server_setting(ctx, interaction.guild_id, "reminder_channel_id")
     if not reminder:
         lines.append("⚠ No reminder channel is set (use /settings set), "
@@ -174,50 +174,34 @@ async def run_spec(ctx, interaction, name=None):
 
 
 async def run_open(ctx, interaction, name=None):
+    """Plain entry point for opening an event (the /run edit panel calls run_edit.open_event directly)."""
     if not await require_organizer(ctx, interaction):
         return
     run = await find_run(ctx, interaction, name)
     if run is None:
         return
     await interaction.response.defer(ephemeral=True)             # posting the announcement can take a moment
-    _, text = await openings.open_run(ctx, interaction.guild_id, run)
+    _, text = await run_edit.open_event(ctx, run)
     await say(interaction, text)
 
 
 async def run_close(ctx, interaction, name=None, day=None):
+    """Plain entry point: close one day now, or the whole event."""
     if not await require_organizer(ctx, interaction):
         return
     run = await find_run(ctx, interaction, name)
     if run is None:
         return
-    if run["status"] != "open":
-        return await say(interaction, f"**{run['name']}** is not open.")
-    now = ctx.now()
     if day:
         row = await find_day(ctx, interaction, run, day)
         if row is None:
             return
-        if now >= cutoff_of(row):
-            return await say(interaction, f"{day_label(row['day'])} is already closed.")
-        ctx.db.set_cutoff(run["id"], row["day"], now)
-        ctx.db.take_snapshot(run["id"], row["day"], ctx.cfg, now)
-        return await say(interaction, f"Signups for {day_label(row['day'])} are closed now and their roles, prog and "
-                                      f"limits are saved. "
-                                      f"Next: `/draft export day:{row['day']}`.")
-    for row in ctx.db.run_days(run["id"]):
-        if now < cutoff_of(row):
-            ctx.db.set_cutoff(run["id"], row["day"], now)
-            ctx.db.take_snapshot(run["id"], row["day"], ctx.cfg, now)
-        else:
-            ensure_snapshot(ctx, run, row["day"])          # closed earlier but the loop has not got to it
-    ctx.db.set_run_status(run["id"], "closed")
-    n = len({r["discord_id"] for r in ctx.db.tick_rows(run["id"])})
-    await say(interaction, f"**{run['name']}** is closed for every day, with {n} players signed up. "
-                           "Check /run status, then /draft export for each day.")
+        return await say(interaction, run_edit.close_day(ctx, run, row))
+    await say(interaction, run_edit.close_event(ctx, run))
 
 
 async def run_extend(ctx, interaction, day, new_cutoff, name=None, timezone=None):
-    """Move one day's cutoff (also reopens a day that already closed)."""
+    """Plain entry point: move one day's cutoff (also reopens a day that already closed)."""
     if not await require_organizer(ctx, interaction):
         return
     run = await find_run(ctx, interaction, name)
@@ -226,28 +210,7 @@ async def run_extend(ctx, interaction, day, new_cutoff, name=None, timezone=None
     row = await find_day(ctx, interaction, run, day)
     if row is None:
         return
-    tz = timezone.strip() if timezone and timezone.strip() in available_timezones() else ctx.cfg["timezone"]
-    try:
-        cutoff = parse_local_datetime(new_cutoff, tz)
-    except ValueError:
-        return await say(interaction, f"The new cutoff looks like 2026-11-01 23:59 (time in {tz}). "
-                                      "You can also use today and tomorrow with a time.")
-    first = ctx.db.first_slot_start(run["id"], row["day"])
-    if cutoff >= first:
-        return await say(interaction, f"The cutoff must be before {day_label(row['day'])}'s first slot "
-                                      f"({discord.utils.format_dt(first, 'F')}).")
-    if cutoff <= ctx.now():
-        return await say(interaction, "That time has already passed. To close a day now use /run close with its day.")
-    if run["status"] == "closed":
-        ctx.db.set_run_status(run["id"], "open")
-    was_exported = bool(row["exported_utc"])
-    ctx.db.set_cutoff(run["id"], row["day"], cutoff, reset_export=True)
-    ctx.db.clear_snapshot(run["id"], row["day"])         # the day reopens; a new snapshot is taken at the new cutoff
-    note = (" It had been exported, so export again after the new cutoff; the stored draft for that day stays "
-            "until you import a new one." if was_exported else "")
-    if row["snapshot_utc"]:
-        note += " The signups saved at the old cutoff were dropped; a new snapshot is taken at the new cutoff."
-    await say(interaction, f"Signups for {day_label(row['day'])} now close {discord.utils.format_dt(cutoff, 'F')}." + note)
+    await say(interaction, run_edit.move_cutoff(ctx, run, row, new_cutoff, timezone))
 
 
 async def run_status(ctx, interaction, name=None, day=None):
@@ -422,7 +385,7 @@ async def draft_export(ctx, interaction, name=None, day=None, force=False):
     if state in ("open", "draft") and not force:
         why = ("The run is still a draft." if state == "draft" else
                f"Signups for {day_label(day_key)} are still open until {discord.utils.format_dt(cutoff_of(row), 'F')}.")
-        return await say(interaction, f"{why} Close it with `/run close day:{day_key}`, or pass `force:true` to export "
+        return await say(interaction, f"{why} Close that day in `/run edit`, or pass `force:true` to export "
                                       "anyway (the draft goes stale if anyone changes their signup afterwards).")
 
     _ensure_snapshots(ctx, run)

@@ -104,7 +104,7 @@ def test_describe_lists_every_day(ctx):
     plan, _ = resolve(ctx, spec(announce={"channel_id": "123", "ping_role_id": "456"}))
     text = events.describe(plan)
     assert "UWU week 1" in text and "Mon 02 Nov" in text and "Wed 04 Nov" in text and "11 × 90 min" in text
-    assert "<#123>" in text and "<@&456>" in text and "/run open" in text
+    assert "<#123>" in text and "<@&456>" in text and "/run edit" in text
     with_open, _ = resolve(ctx, spec(announce={"open_at": "2026-10-28 12:00"}))
     assert "Opens by itself" in events.describe(with_open)
 

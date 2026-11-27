@@ -340,7 +340,7 @@ class AnnounceModal(discord.ui.Modal):
         self.add_item(discord.ui.Label(text="Role to ping", component=self.role))
         self.add_item(discord.ui.Label(text="Message", component=self.message))
         self.add_item(discord.ui.Label(text="Open signups at", component=self.open_at,
-                                       description="Date and time in the cutoff timezone. Empty = you run /run open."))
+                                       description="Date and time in the cutoff timezone. Empty = you open it with /run edit."))
 
     async def on_submit(self, interaction):
         d = self.owner.draft
