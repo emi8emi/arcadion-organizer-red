@@ -1,7 +1,7 @@
 """The buttons on party threads: ended, edit composition, the "why was I swapped" notice, /party import."""
 import json
 
-from bot import handlers, parties, party_views
+from bot import handlers, parties, party_views, slot_editor
 from bot.db import parse_iso
 from bot.posting import party_message, post_rating_prompts
 from bot.votes import time_reason
@@ -270,6 +270,28 @@ def test_a_failing_thread_step_is_reported_but_the_swap_stands(ctx, make_run, cl
 
 # ---------------------------------------------------------------- the panel
 
+
+def editor(ctx, pid):
+    return slot_editor.SlotEditView(ctx, ctx.db.party(pid)["slot_id"], 500, 100)
+
+
+def stage_swap(view, out_id, in_id, code="no_show", text=""):
+    """Pick a swap in the slot editor and Stage it (through the reason modal, as a click would)."""
+    view.action, view.subject, view.object, view.reason_code = "swap", out_id, in_id, code
+    modal = slot_editor.ReasonModal(view)
+    modal.text._value = text
+    it = organizer(user_id=500)
+    run_async(modal.on_submit(it))
+    return it
+
+
+def press_apply(view):
+    it = organizer(user_id=500)
+    button = next(c for c in view.children if isinstance(c, slot_editor.ApplyButton))
+    run_async(button.callback(it))
+    return it
+
+
 def test_the_panel_is_for_organizers_only(ctx, make_run, clock):
     run, pid, thread, chan = approved(ctx, make_run)
     it = player(1)
@@ -278,24 +300,22 @@ def test_the_panel_is_for_organizers_only(ctx, make_run, clock):
     org = organizer(user_id=500)
     run_async(party_views.open_edit_panel(ctx, org, pid))
     view = org.response.sent[0]["view"]
-    assert "can read the reason" in org.text and len(view.out_select.options) == 8
+    assert "can read the reason" in org.text and len(view.subject_select.options) == 8
 
 
 def test_a_swap_with_warnings_needs_a_second_confirmation(ctx, make_run, clock):
     run, pid, thread, chan = approved(ctx, make_run)
     add_player(ctx, run, 31, ["melee"], 0, ["2026-11-03T17:00"])           # did not tick this slot
-    panel = party_views.EditPartyView(ctx, pid, "500")
-    panel.out_id, panel.in_id, panel.in_name, panel.reason_code = "8", "31", "P31", "cant_make_it"
-    modal = party_views.SwapModal(panel)
-    modal.role._value, modal.text._value = "", ""
-    sub = organizer(user_id=500)
-    run_async(modal.on_submit(sub))
-    assert "did not tick this slot" in sub.text
+    view = editor(ctx, pid)
+    staged = stage_swap(view, "8", "31", "cant_make_it")
+    assert "did not tick this slot" in staged.text                          # the preview already warns
+    sub = press_apply(view)
+    assert "did not tick this slot" in sub.response.sent[0]["content"]
     assert "31" not in {m["discord_id"] for m in ctx.db.party_members(pid)}          # not yet
     force = sub.response.sent[0]["view"]
     go = organizer(user_id=500)
     run_async(force.force.callback(go))
-    assert "Swapped" in go.text and "31" in {m["discord_id"] for m in ctx.db.party_members(pid)}
+    assert "<@8> → <@31>" in go.text and "31" in {m["discord_id"] for m in ctx.db.party_members(pid)}
     change = ctx.db.party_changes(pid)[-1]
     assert "did not tick" in change["warnings_json"] and change["reason_code"] == "cant_make_it"
 
@@ -303,19 +323,15 @@ def test_a_swap_with_warnings_needs_a_second_confirmation(ctx, make_run, clock):
 def test_a_clean_swap_needs_no_confirmation_and_other_needs_text(ctx, make_run, clock):
     run, pid, thread, chan = approved(ctx, make_run)
     add_player(ctx, run, 30, ["caster"], 0, [S2])
-    panel = party_views.EditPartyView(ctx, pid, "500")
-    panel.out_id, panel.in_id, panel.in_name, panel.reason_code = "8", "30", "P30", "other"
-    modal = party_views.SwapModal(panel)
-    modal.role._value, modal.text._value = "", "  "
-    refused = organizer(user_id=500)
-    run_async(modal.on_submit(refused))
-    assert "needs a written reason" in refused.text and "30" not in {m["discord_id"] for m in ctx.db.party_members(pid)}
-    panel.out_id, panel.in_id = "8", "30"
-    modal.text._value = "Prog too far apart"
-    ok = organizer(user_id=500)
-    run_async(modal.on_submit(ok))
-    assert "Swapped" in ok.text and "30" in {m["discord_id"] for m in ctx.db.party_members(pid)}
+    view = editor(ctx, pid)
+    refused = stage_swap(view, "8", "30", "other", "  ")
+    assert "needs a written reason" in refused.text and view.ops == []
+    ok = stage_swap(view, "8", "30", "other", "Prog too far apart")
+    assert view.ops and "<@8> → <@30>" in ok.text
+    done = press_apply(view)
+    assert "<@8> → <@30>" in done.text and "30" in {m["discord_id"] for m in ctx.db.party_members(pid)}
     assert ctx.db.party_changes(pid)[-1]["reason_text"] == "Prog too far apart"
+    assert view.ops == []
 
 
 def test_the_panel_texts_and_the_ended_message_fit_discords_limits(ctx, make_run, clock):
@@ -324,13 +340,19 @@ def test_the_panel_texts_and_the_ended_message_fit_discords_limits(ctx, make_run
     end_it(ctx, pid, 3)
     slot, [(party, members)] = ctx.db.approved_slots(run["id"], D2)[0]
     assert len(party_message(run, slot, party, members, ctx.db.checkpoints(1))) < 2000
-    panel = party_views.EditPartyView(ctx, pid, "500")
-    assert len(panel.render()) < 2000
-    modal = party_views.SwapModal(panel)
-    assert len(modal.text.label) <= 45 and len(modal.role.label) <= 45
-    for item in panel.children:
-        for o in getattr(item, "options", []):
-            assert len(o.label) <= 100
+    view = editor(ctx, pid)
+    assert len(view.render()) < 2000
+    for action in slot_editor.ACTIONS:
+        view.action = action
+        view.refresh()
+        assert len(view.render()) < 2000
+        for item in view.children:
+            for o in getattr(item, "options", []):
+                assert len(o.label) <= 100
+            assert len(getattr(item, "placeholder", None) or "") <= 150
+    for modal in (slot_editor.ReasonModal(view), slot_editor.PfModal(view), slot_editor.AnyoneModal(view)):
+        for item in modal.children:
+            assert len(item.text) <= 45
 
 
 # ---------------------------------------------------------------- JSON round trip
@@ -405,13 +427,11 @@ def test_import_handles_role_changes_bad_files_and_non_organizers(ctx, make_run,
     assert "Only organizers" in plain.text
 
 
-def test_a_slow_swap_answers_discord_first_so_the_interaction_cannot_expire(ctx, make_run, clock):
+def test_a_slow_apply_answers_discord_first_so_the_interaction_cannot_expire(ctx, make_run, clock):
     run, pid, thread, chan = approved(ctx, make_run)
     add_player(ctx, run, 30, ["caster"], 0, [S2])
-    panel = party_views.EditPartyView(ctx, pid, "500")
-    panel.out_id, panel.in_id, panel.in_name = "8", "30", "P30"
-    modal = party_views.SwapModal(panel)
-    modal.role._value, modal.text._value = "", ""
+    view = editor(ctx, pid)
+    stage_swap(view, "8", "30")
     it = organizer(user_id=500)
     order = []
     orig_defer, orig_edit = it.response.defer, it.edit_original_response
@@ -424,8 +444,9 @@ def test_a_slow_swap_answers_discord_first_so_the_interaction_cannot_expire(ctx,
         order.append("edit")
         await orig_edit(**kw)
     it.response.defer, it.edit_original_response = defer, edit
-    run_async(modal.on_submit(it))
-    assert order == ["defer", "edit"] and "Swapped" in it.text
+    button = next(c for c in view.children if isinstance(c, slot_editor.ApplyButton))
+    run_async(button.callback(it))
+    assert order == ["defer", "edit"] and "<@8> → <@30>" in it.text
 
 
 def test_a_user_discord_does_not_know_is_not_reported_as_a_problem(ctx, make_run, clock):

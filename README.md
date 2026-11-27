@@ -324,12 +324,22 @@ Each approved party gets a message in its slot's thread with buttons that keep w
   the party done, logs the minutes played for burnout tracking and posts the rating button. An organizer can end it
   for everyone or undo an ended party. When a slot's length runs out, the minute loop ends its parties
   automatically.
-* **Edit composition** (organizers): a panel to swap a member out, change a role, or export the party as JSON,
-  edit it elsewhere and bring it back with `/party import`. A swap needs a reason (did not show up, can't make
-  it, role or prog did not fit, other). Replacements come from the standby list, but any Discord member can be
-  chosen. The bot warns when the replacement has not signed up, does not list the role, has a prog below the party's target, did not tick the slot, is already in another party of that slot, or would go over their daily or per-run limit; an organizer may force it anyway. The
-  swapped-out player is told in the parties channel, removed from the thread and put back on standby, and a
-  **Why was I swapped?** button shows them the reason. A player swapped in is asked to confirm too.
+* **Edit composition** (organizers): opens a slot editor showing every party of the slot and the standby list.
+  Pick an action, the player and the target, press **Stage**; nothing changes until **Apply**. Actions: swap a
+  player for another, change a role, move a player to another party of the slot (it needs a free seat; use trade
+  when both are full), trade two players between parties, take a player out (the party is left short and flagged),
+  add a player to a short party, and add or remove a **Party Finder** seat. **Undo** drops the last staged edit.
+  Swaps and removals need a reason (did not show up, can't make it, role or prog did not fit, other). Replacements
+  come from the standby list, but any Discord member can be chosen. The editor warns when the replacement has not
+  signed up, does not list the role, has a prog below the party's target, did not tick the slot, is in another
+  party of that slot, or would go over their daily or per-run limit; **Apply anyway** forces it. Errors (a full
+  party, the same player seated twice) always block. Everything staged is applied in one transaction, with one
+  thread message and one parties-channel notice per player who left the slot, who also gets a **Why was I
+  swapped?** button. Players moved inside the slot are not told they left. Players who join are asked to confirm.
+  The old export JSON and `/party import` go through the same code (`bot/party_edit.py`).
+* **Short parties and Party Finder**: a party with fewer than 8 seats is flagged (`⚠ Short by N`) in the
+  confirmation prompt and the status dashboard. Party Finder players are not Discord members, so they are stored as
+  seats (`party_pf`: role, optional name, who added them) that count as filled and show in the prompt and dashboard.
 * Edits are allowed until the slot closes. `/draft approve` stores the parties exactly as the solver made them
   (`party_originals`) and every later change goes into `party_changes`, so manual edits can be compared with the
   solver's output later (the aim is that most changes end up being just no-shows).

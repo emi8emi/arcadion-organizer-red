@@ -50,7 +50,7 @@ def reason_label(code, text):
 
 # ---------------------------------------------------------------- validation of a swap
 
-def swap_warnings(ctx, party, in_id, in_role):
+def swap_warnings(ctx, party, in_id, in_role, moving=False):
     """Plain-language problems with putting `in_id` into `party` as `in_role`. Empty means nothing to warn about.
 
     Warnings never block: an organizer can force the swap.
@@ -71,6 +71,8 @@ def swap_warnings(ctx, party, in_id, in_role):
                    f"({checkpoint_label(cps, party['target_idx'])}).")
     if slot_key not in db.ticked_keys(run_id, in_id):
         out.append("They did not tick this slot.")
+    if moving:                                              # already seated in this slot: limits do not change
+        return out
     mine = db.player_parties(run_id, in_id)
     for p in mine:
         if p["slot_key"] == slot_key:
@@ -82,6 +84,11 @@ def swap_warnings(ctx, party, in_id, in_role):
     if len(mine) >= lim["max_per_run"]:
         out.append(f"This would be party {len(mine) + 1} of the run for them (their max is {lim['max_per_run']}).")
     return out
+
+
+def comp_text(counts):
+    """'1 Main tank, 1 Off tank, ...' for a {role: count} dict."""
+    return ", ".join(f"{counts.get(r, 0)} {role_label(r)}" for r in ROLES)
 
 
 def comp_warnings(ctx, party, changes):
@@ -167,59 +174,17 @@ async def auto_end_parties(ctx):
 
 async def apply_swap(ctx, guild_id, party_id, out_id, in_id, in_role, actor_id, *, reason_code, reason_text,
                      warnings=None, in_name=None, source="panel"):
-    """Do a swap and tell everyone. Returns (change_id, problems), problems being Discord steps that failed."""
-    from .posting import NO_PING
-    from .party_views import WhySwappedView
-    db = ctx.db
-    party = db.party(party_id)
-    if db.get_player(in_id) is None:                       # anyone in the server may be added
-        db.upsert_player(in_id, in_name or str(in_id), now=ctx.now())
-    helpers = db.helper_ids(db.run(party["run_id"])["fight_id"])
-    change_id = db.swap_member(party_id, out_id, in_id, in_role, actor_id, ctx.now(), reason_code=reason_code,
-                               reason_text=reason_text, warnings=warnings, is_helper=str(in_id) in helpers,
-                               source=source)
-    problems = []
-    err = await refresh_party_message(ctx, party_id)
-    if err:
-        problems.append(err)
-    thread = await thread_of(ctx, party)
-    n = party["party_index"] + 1
-    if thread is None:
-        problems.append("I could not find the party's thread, so nobody was added or removed there.")
-    else:
-        for action, uid in ((thread.remove_user, out_id), (thread.add_user, in_id)):
-            try:
-                await action(discord.Object(id=int(uid)))
-            except discord.NotFound:                    # not a member of the thread / not a real account: nothing to do
-                log.info("user %s not found when changing thread members", uid)
-            except Exception as e:
-                log.exception("thread member change failed")
-                problems.append(f"Could not {'remove' if uid == out_id else 'add'} <@{uid}> "
-                                f"{'from' if uid == out_id else 'to'} the thread ({e}). I need Manage Threads.")
-        try:                                                # the new player gets a real ping
-            await thread.send(f"<@{in_id}> joins party {n} as {role_label(in_role)}, replacing <@{out_id}>.",
-                              allowed_mentions=discord.AllowedMentions(users=[discord.Object(id=int(in_id))]))
-        except Exception:
-            log.exception("could not announce the swap")
-            problems.append(f"Could not ping <@{in_id}> in the thread.")
-    from . import confirmations
-    problems += [p for p in [await confirmations.thread_prompt(ctx, party["slot_id"], ping=[str(in_id)])] if p]
-    channel_id = server_setting(ctx, guild_id, "parties_channel_id")
-    channel = await find_channel(ctx, channel_id)
-    if channel is None:
-        problems.append("No parties channel found (not set, deleted, or I lost access), so <@%s> was not notified. "
-                        "Tell them yourself." % out_id)
-    else:
-        try:
-            await channel.send(
-                f"<@{out_id}> you were swapped out of party {n} on "
-                f"{discord.utils.format_dt(parse_iso(party['start_utc']), 'F')} and are back in the standby pool "
-                "for that slot. Press the button to see why.", view=WhySwappedView(change_id),
-                allowed_mentions=discord.AllowedMentions(users=[discord.Object(id=int(out_id))]))
-        except Exception as e:
-            log.exception("could not post the swap notice")
-            problems.append(f"Could not notify <@{out_id}> in the parties channel ({e}).")
-    return change_id, problems
+    """Do a swap and tell everyone (a one-operation edit, see party_edit.py). Returns (change_id, problems), problems
+    being Discord steps that failed. Raises ValueError when the swap no longer applies to the party."""
+    from . import party_edit
+    party = ctx.db.party(party_id)
+    op = {"op": "swap", "party": party_id, "out": str(out_id), "in": str(in_id), "role": in_role,
+          "reason": {"code": reason_code, "text": reason_text}, "source": source}
+    result, ids, problems = await party_edit.apply(ctx, guild_id, party["slot_id"], [op], actor_id, warnings=warnings,
+                                                   names={str(in_id): in_name} if in_name else None)
+    if result.errors or not ids:
+        raise ValueError("swap does not apply to this party")
+    return ids[0], problems
 
 
 # ---------------------------------------------------------------- JSON round trip

@@ -173,6 +173,12 @@ def prompt_text(ctx, run, slot, ask=None, reminder=False):
             row = have.get(m["discord_id"])
             note = f" · {cancel_label(row['reason_code'], row['reason_text'])}" if row and row["status"] == "declined" else ""
             lines.append(f"{MARKS[row['status'] if row else None]} <@{m['discord_id']}> {role_label(m['role'])}{note}")
+        if party["status"] != "draft":                      # seats filled from Party Finder, and open seats
+            pf = db.party_pf(party["id"])
+            lines += [f"🎮 Party Finder · {role_label(x['role'])}" + (f" · {x['name']}" if x["name"] else "") for x in pf]
+            gap = sum(ctx.cfg["party"].values()) - len(members) - len(pf)
+            if gap > 0:
+                lines.append(f"⚠ Short by {gap}: still needs a player")
     lines.append("✅ confirmed · ⏳ waiting · ❌ can't make it" + (" · ▫️ not asked yet" if not approved else ""))
     return "\n".join(lines)[:1990]
 

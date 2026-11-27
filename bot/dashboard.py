@@ -35,8 +35,10 @@ def party_issues(ctx, party, members, slot, have, now, thread_ok=True):
     approved = party["status"] in ("confirmed", "done")
     if party["status"] == "done":
         return out
-    if len(ids) != want:
-        out.append((WARN, f"{len(ids)} of {want} seats filled."))
+    pf = ctx.db.party_pf(party["id"])                          # seats filled from Party Finder count as filled
+    if len(ids) + len(pf) != want:
+        out.append((WARN, f"{len(ids) + len(pf)} of {want} seats filled" + (f" ({len(pf)} from Party Finder)." if pf else ".")
+                    + (" Use Edit composition to add a player." if len(ids) + len(pf) < want else "")))
     for d in declined:
         r = have[d]
         why = cf.cancel_label(r["reason_code"], r["reason_text"])
@@ -75,6 +77,7 @@ async def collect(ctx, run, day):
             issues = party_issues(ctx, party, members, slot, have, now, ok)
             ids = [m["discord_id"] for m in members]
             rows.append({"slot": slot, "party": party, "members": members, "have": have, "issues": issues,
+                         "pf": ctx.db.party_pf(party["id"]),
                          "level": max((lvl for lvl, _ in issues), default=0),
                          "counts": cf.counts(ctx.db, slot["id"], ids),
                          "url": (f"https://discord.com/channels/{run['guild_id']}/{slot['thread_id']}"
@@ -122,6 +125,8 @@ def detail_text(run, row):
         lines.append(f"{MARKS[have['status'] if have else None]} <@{m['discord_id']}> {role_label(m['role'])}"
                      + (f" · {cf.cancel_label(have['reason_code'], have['reason_text'])}"
                         if have and have["status"] == "declined" else ""))
+    lines += [f"🎮 Party Finder · {role_label(x['role'])}" + (f" · {x['name']}" if x["name"] else "")
+              for x in row.get("pf", [])]
     lines += [f"{DOT[lvl]} {text}" for lvl, text in sorted(row["issues"], reverse=True)]
     return "\n".join(lines)[:1990]
 

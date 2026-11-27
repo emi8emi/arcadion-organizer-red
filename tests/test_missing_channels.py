@@ -63,19 +63,17 @@ def test_the_swap_notice_survives_a_deleted_parties_channel(ctx, make_run, clock
     from conftest import add_player, organizer
     add_player(ctx, run, 31, ["melee"], 0, ["2026-11-02T17:00"])
     ctx.get_channel = raising
-    panel = party_views.EditPartyView(ctx, pid, "500")
-    panel.out_id, panel.in_id, panel.in_name, panel.reason_code = "8", "31", "P31", "cant_make_it"
-    modal = party_views.SwapModal(panel)
-    modal.role._value, modal.text._value = "", ""
-    sub = organizer(user_id=500)
-    run_async(modal.on_submit(sub))
+    from test_party_actions import editor, press_apply, stage_swap
+    view = editor(ctx, pid)
+    stage_swap(view, "8", "31", "cant_make_it")
+    sub = press_apply(view)
     force = sub.response.sent[0]["view"] if sub.response.sent else None
-    if force is not None:
+    if force is not None:                                      # the "did not tick" warning asks first
         go = organizer(user_id=500)
         run_async(force.force.callback(go))
         sub = go
     assert "31" in {m["discord_id"] for m in ctx.db.party_members(pid)}
-    assert "No parties channel found" in sub.text or "Swapped" in sub.text
+    assert "No parties channel found" in sub.text
 
 
 def test_a_dead_reminder_channel_is_reported_once_not_every_minute(ctx, world, clock, caplog):  # noqa: F811

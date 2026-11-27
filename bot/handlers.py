@@ -984,25 +984,20 @@ async def party_import(ctx, interaction, party_file):
         return await say(interaction, "Import refused, nothing changed. Warnings (set \"force\": true in the file to "
                          "accept them):\n" + "\n".join("• " + w for w in warnings))
     await interaction.response.defer(ephemeral=True)
-    lines, now = [], ctx.now()
+    from . import party_edit
+    party = ctx.db.party(party_id)
+    edit = []
     for op in ops:
         if op["kind"] == "swap":
-            try:
-                _, problems = await apply_swap(ctx, interaction.guild_id, party_id, op["out"], op["in"], op["role"],
-                                               interaction.user.id, reason_code=op["code"], reason_text=op["text"],
-                                               warnings=warnings or None, source="import")
-            except ValueError:
-                lines.append(f"⚠ Could not swap <@{op['out']}>: the party changed meanwhile.")
-                continue
-            lines.append(f"✅ <@{op['out']}> → <@{op['in']}> as {role_label(op['role'])}")
-            lines += ["⚠ " + p for p in problems]
+            edit.append({"op": "swap", "party": party_id, "out": op["out"], "in": op["in"], "role": op["role"],
+                         "reason": {"code": op["code"], "text": op["text"]}, "source": "import"})
         else:
-            ctx.db.set_member_role(party_id, op["player"], op["role"], interaction.user.id, now,
-                                   warnings=warnings or None, source="import")
-            lines.append(f"✅ <@{op['player']}> is now {role_label(op['role'])}")
-    from .parties import refresh_party_message
-    await refresh_party_message(ctx, party_id)
-    await say(interaction, "\n".join(lines)[:1990])
+            edit.append({"op": "role", "party": party_id, "player": op["player"], "role": op["role"], "source": "import"})
+    result, _, problems = await party_edit.apply(ctx, interaction.guild_id, party["slot_id"], edit, interaction.user.id,
+                                                 warnings=warnings or None)
+    if result.errors:
+        return await say(interaction, "Import refused, nothing changed:\n" + "\n".join("• " + e for e in result.errors))
+    await say(interaction, "\n".join(result.lines + ["⚠ " + p for p in problems])[:1990])
 
 
 # ---------------------------------------------------------------- /helper

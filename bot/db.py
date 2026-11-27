@@ -19,7 +19,7 @@ PROG_POINTS_DIR = Path(__file__).resolve().parent.parent / "prog_points"
 
 # The newest dashboard migration this code depends on. Raise it in the same change that starts using a
 # new table or column; a database that is further along is fine (migrations only add things).
-REQUIRED_SCHEMA_VERSION = 7
+REQUIRED_SCHEMA_VERSION = 8
 
 
 GUILD_SETTING_KEYS = ("organizer_role_id", "reminder_channel_id", "parties_channel_id",
@@ -893,6 +893,89 @@ class DB:
             """SELECT m.discord_id FROM party_members m JOIN parties p ON p.id = m.party_id
                WHERE p.slot_id = ? AND p.status IN ('confirmed', 'done')""", (slot_id,))}
         return sorted(r[0] for r in rows if r[0] not in seated)
+
+    def party_pf(self, party_id):
+        """Seats of this party filled from Party Finder: rows with id, role, name."""
+        return self.conn.execute("SELECT * FROM party_pf WHERE party_id = ? ORDER BY id", (party_id,)).fetchall()
+
+    def active_slot_parties(self, slot_id):
+        """The approved parties (confirmed or done) of a slot, in party order."""
+        return self.conn.execute(
+            "SELECT * FROM parties WHERE slot_id = ? AND status IN ('confirmed', 'done') ORDER BY party_index",
+            (slot_id,)).fetchall()
+
+    def apply_slot_edit(self, slot_id, after, changes, actor_id, now):
+        """Apply a whole composition edit of one slot in one transaction.
+
+        `after` maps party_id to {"members": {discord_id: {"role", "is_helper"}}, "pf": [{"id" or None, "role",
+        "name"}]}: the state wanted for every party that changes. Members who leave a party lose the ratings and
+        feedback they gave or got there (they were not there); those who leave the slot altogether go to standby and
+        lose their play_log row and slot votes; those who join the slot leave standby and, if the party already
+        ended, get the same minutes as its other members. `changes` are party_changes rows to log (dicts with
+        party_id, kind and the log_change fields). Returns the ids of the logged changes, in order.
+        """
+        def seated():
+            return {r[0] for r in self.conn.execute(
+                """SELECT m.discord_id FROM party_members m JOIN parties p ON p.id = m.party_id
+                   WHERE p.slot_id = ? AND p.status IN ('confirmed', 'done')""", (slot_id,))}
+
+        ids = []
+        with self.conn:
+            before_seated = seated()
+            minutes = {}
+            for pid in after:
+                minutes[pid] = self.conn.execute(
+                    "SELECT MAX(minutes) FROM play_log WHERE slot_id = ? AND discord_id IN "
+                    "(SELECT discord_id FROM party_members WHERE party_id = ?)", (slot_id, pid)).fetchone()[0]
+            for pid, want in after.items():
+                have = {m["discord_id"]: m for m in self.party_members(pid)}
+                for did in have:
+                    if did not in want["members"]:
+                        self.conn.execute("DELETE FROM party_members WHERE party_id = ? AND discord_id = ?", (pid, did))
+                        self.conn.execute("DELETE FROM party_ratings WHERE party_id = ? AND voter_id = ?", (pid, did))
+                        self.conn.execute("DELETE FROM party_feedback WHERE party_id = ? AND (reporter_id = ? OR target_id = ?)",
+                                          (pid, did, did))
+                for did, m in want["members"].items():
+                    if did not in have:
+                        self.conn.execute(
+                            "INSERT INTO party_members (party_id, discord_id, role, is_helper, placed_down, distance) "
+                            "VALUES (?, ?, ?, ?, 0, 0)", (pid, did, m["role"], int(m.get("is_helper", False))))
+                    elif have[did]["role"] != m["role"]:
+                        self.conn.execute("UPDATE party_members SET role = ? WHERE party_id = ? AND discord_id = ?",
+                                          (m["role"], pid, did))
+                keep = {x["id"] for x in want["pf"] if x.get("id")}
+                for row in self.party_pf(pid):
+                    if row["id"] not in keep:
+                        self.conn.execute("DELETE FROM party_pf WHERE id = ?", (row["id"],))
+                for x in want["pf"]:
+                    if x.get("id"):
+                        self.conn.execute("UPDATE party_pf SET role = ?, name = ? WHERE id = ?",
+                                          (x["role"], x.get("name"), x["id"]))
+                    else:
+                        self.conn.execute("INSERT INTO party_pf (party_id, role, name, added_utc, added_by) "
+                                          "VALUES (?, ?, ?, ?, ?)", (pid, x["role"], x.get("name"), iso(now), str(actor_id)))
+            after_seated = seated()
+            for did in before_seated - after_seated:                      # left the slot
+                self.conn.execute("INSERT INTO standby (slot_id, discord_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
+                                  (slot_id, did))
+                self.conn.execute("DELETE FROM play_log WHERE slot_id = ? AND discord_id = ?", (slot_id, did))
+                self.conn.execute("DELETE FROM votes WHERE slot_id = ? AND (voter_id = ? OR target_id = ?)",
+                                  (slot_id, did, did))
+            for did in after_seated - before_seated:                      # joined the slot
+                self.conn.execute("DELETE FROM standby WHERE slot_id = ? AND discord_id = ?", (slot_id, did))
+                for pid, want in after.items():
+                    party = self.party(pid)
+                    if did in want["members"] and party["ended_utc"] and minutes.get(pid) is not None:
+                        self.conn.execute("INSERT INTO play_log (slot_id, discord_id, minutes) VALUES (?, ?, ?) "
+                                          "ON CONFLICT (slot_id, discord_id) DO UPDATE SET minutes = excluded.minutes",
+                                          (slot_id, did, minutes[pid]))
+            for c in changes:
+                party = self.party(c["party_id"])
+                ids.append(self.log_change(
+                    party, actor_id, c["kind"], now, player_id=c.get("player_id"),
+                    other_player_id=c.get("other_player_id"), reason_code=c.get("reason_code"),
+                    reason_text=c.get("reason_text"), warnings=c.get("warnings"), detail=c.get("detail")))
+        return ids
 
     def swap_member(self, party_id, out_id, in_id, in_role, actor_id, now, *, reason_code, reason_text,
                     warnings=None, is_helper=False, source="panel"):
