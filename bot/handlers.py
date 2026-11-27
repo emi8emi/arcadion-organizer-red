@@ -1029,3 +1029,46 @@ async def helper_revoke(ctx, interaction, member, content=None):
         await say(interaction, f"{member.display_name} is no longer a helper for {fight['name']}.")
     else:
         await say(interaction, f"{member.display_name} was not a helper for {fight['name']}.")
+
+
+async def helper_support(ctx, interaction, member, helpers, required=False, content=None):
+    """Seat this player only with `helpers` helpers or higher-prog players (soft; `required` makes it a hard rule)."""
+    if not await require_organizer(ctx, interaction):
+        return
+    fight = _fight_for(ctx, content)
+    if fight is None:
+        return await say(interaction, "Which content? Give its name.")
+    if not 1 <= helpers <= 7:
+        return await say(interaction, "Helpers must be between 1 and 7.")
+    ctx.db.set_support_need(fight["id"], member.id, helpers, required, interaction.user.id, ctx.now())
+    cap = ctx.cfg.get("max_helpers_per_party")
+    note = (f"\nThe solver caps helpers per party at {cap}, so the rest has to come from players with a higher prog."
+            if cap is not None and helpers > cap else "")
+    await say(interaction, f"{member.display_name} will be seated with {helpers} helper(s) or higher-prog player(s) for "
+                           f"{fight['name']} ({'required: left out if it cannot be met' if required else 'preferred: the solver tries its best'})."
+                           + note + "\nExport again to send it to the solver.")
+
+
+async def helper_unsupport(ctx, interaction, member, content=None):
+    if not await require_organizer(ctx, interaction):
+        return
+    fight = _fight_for(ctx, content)
+    if fight is None:
+        return await say(interaction, "Which content? Give its name.")
+    if ctx.db.clear_support_need(fight["id"], member.id):
+        await say(interaction, f"{member.display_name} no longer needs support for {fight['name']}.")
+    else:
+        await say(interaction, f"{member.display_name} had no support need for {fight['name']}.")
+
+
+async def helper_list(ctx, interaction, content=None):
+    if not await require_organizer(ctx, interaction):
+        return
+    fight = _fight_for(ctx, content)
+    if fight is None:
+        return await say(interaction, "Which content? Give its name.")
+    helpers, needs = sorted(ctx.db.helper_ids(fight["id"])), ctx.db.support_needs(fight["id"])
+    lines = [f"**{fight['name']}**", "Helpers: " + (", ".join(f"<@{d}>" for d in helpers) or "nobody")]
+    lines += [f"Needs support: <@{d}> · {n['helpers']} helper(s)" + (" · required" if n["required"] else "")
+              for d, n in sorted(needs.items())] or ["Needs support: nobody"]
+    await say(interaction, "\n".join(lines))

@@ -8,7 +8,7 @@ import discord
 from bot.services import MAX_PER_RUN
 from bot import handlers
 from bot.db import split_roles
-from bot.solver_io import build_signups, import_draft
+from bot.solver_io import fingerprint, build_signups, import_draft
 from bot.views import AvailabilityView, DoneButton, LimitsButton
 from conftest import (pick_roles, add_party_players, draft_for_day, NOW, ORGANIZER_ROLE_ID, SLOT, FakeAttachment, add_player, draft_for, fill_one_party,
                       organizer, player, run_async)
@@ -518,6 +518,27 @@ def test_helper_grant_and_revoke_feed_the_export(ctx, make_run):
     assert "no longer a helper" in do(ctx, handlers.helper_revoke, organizer(), member).text
     assert "was not a helper" in do(ctx, handlers.helper_revoke, organizer(), member).text
     assert "Which content?" in do(ctx, handlers.helper_grant, organizer(), member, "Nope").text
+
+
+def test_support_needs_feed_the_export_and_can_be_cleared(ctx, make_run):
+    run = make_run(status="closed")
+    fill_one_party(ctx, run, SLOT)
+    member = SimpleNamespace(id=3, display_name="Cy")
+    before = build_signups(ctx.db, run, ctx.cfg)[0]
+    assert all("needs_support" not in p for p in before["players"])            # no key unless flagged
+    text = do(ctx, handlers.helper_support, organizer(), member, 2).text
+    assert "2 helper(s)" in text and "preferred" in text and "caps helpers per party" not in text.replace("at 1", "")
+    after = build_signups(ctx.db, run, ctx.cfg)[0]
+    assert {p["id"]: p.get("needs_support") for p in after["players"]}["3"] == {"helpers": 2, "required": False}
+    assert fingerprint(after) != fingerprint(before)                              # a stale export is caught
+    assert "required" in do(ctx, handlers.helper_support, organizer(), member, 3, True).text
+    assert ctx.db.support_needs(1)["3"] == {"helpers": 3, "required": True}
+    listing = do(ctx, handlers.helper_list, organizer()).text
+    assert "<@3> · 3 helper(s) · required" in listing
+    assert "no longer needs support" in do(ctx, handlers.helper_unsupport, organizer(), member).text
+    assert "had no support need" in do(ctx, handlers.helper_unsupport, organizer(), member).text
+    assert "between 1 and 7" in do(ctx, handlers.helper_support, organizer(), member, 9).text
+    assert "Only organizers" in do(ctx, handlers.helper_support, player(4), member, 1).text
 
 
 def test_defaults_from_env_do_not_leak_into_another_server(ctx):

@@ -154,6 +154,25 @@ class HelperGroup(app_commands.Group):
                      content: Optional[str] = None):
         await handlers.helper_revoke(self.ctx, interaction, member, content)
 
+    @app_commands.command(name="support", description="Seat a player with helpers or higher-prog players")
+    @app_commands.describe(member="Who needs company", helpers="How many helpers or higher-prog players (1-7)",
+                           required="Hard rule: leave them out if it cannot be met (default: only a preference)",
+                           content="The fight (optional while there is only one)")
+    async def support(self, interaction: discord.Interaction, member: discord.Member, helpers: int,
+                      required: bool = False, content: Optional[str] = None):
+        await handlers.helper_support(self.ctx, interaction, member, helpers, required, content)
+
+    @app_commands.command(name="unsupport", description="Remove a player's support need")
+    @app_commands.describe(member="Who", content="The fight (optional while there is only one)")
+    async def unsupport(self, interaction: discord.Interaction, member: discord.Member,
+                        content: Optional[str] = None):
+        await handlers.helper_unsupport(self.ctx, interaction, member, content)
+
+    @app_commands.command(name="list", description="Helpers and players who need support")
+    @app_commands.describe(content="The fight (optional while there is only one)")
+    async def list(self, interaction: discord.Interaction, content: Optional[str] = None):
+        await handlers.helper_list(self.ctx, interaction, content)
+
 
 class DebugGroup(app_commands.Group):
     def __init__(self, ctx):

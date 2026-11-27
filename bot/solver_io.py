@@ -78,6 +78,7 @@ def build_signups(db, run, cfg, day=None, now=None):
     checkpoints = db.checkpoints(run["fight_id"])
     pos = phase_positions(checkpoints, cfg["solver_phase_cross_cost"])
     helpers = db.helper_ids(run["fight_id"])
+    needs = db.support_needs(run["fight_id"])
     unmatched = db.previous_unmatched(run, day)
     played = db.played_counts(run["id"], day) if day else {}
 
@@ -122,6 +123,7 @@ def build_signups(db, run, cfg, day=None, now=None):
             "drop": {"opt_in": n_drop > 0, "max_drop": drop_units(pos, row["prog_index"], n_drop)},
             "unmatched_last_run": did in unmatched,
             "available": sorted(set(ticks[did]["keys"])),
+            **({"needs_support": needs[did]} if did in needs else {}),
         })
 
     if day:

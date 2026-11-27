@@ -19,7 +19,7 @@ PROG_POINTS_DIR = Path(__file__).resolve().parent.parent / "prog_points"
 
 # The newest dashboard migration this code depends on. Raise it in the same change that starts using a
 # new table or column; a database that is further along is fine (migrations only add things).
-REQUIRED_SCHEMA_VERSION = 8
+REQUIRED_SCHEMA_VERSION = 9
 
 
 GUILD_SETTING_KEYS = ("organizer_role_id", "reminder_channel_id", "parties_channel_id",
@@ -541,6 +541,26 @@ class DB:
         rows = self.conn.execute(
             "SELECT discord_id FROM helper_grants WHERE fight_id = ?", (fight_id,)).fetchall()
         return {r["discord_id"] for r in rows}
+
+    def set_support_need(self, fight_id, discord_id, helpers, required, set_by, now):
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO support_needs (fight_id, discord_id, helpers, required, set_by, set_utc) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (fight_id, discord_id) DO UPDATE SET helpers = excluded.helpers, "
+                "required = excluded.required, set_by = excluded.set_by, set_utc = excluded.set_utc",
+                (fight_id, str(discord_id), int(helpers), bool(required), str(set_by), iso(now)))
+
+    def clear_support_need(self, fight_id, discord_id):
+        with self.conn:
+            cur = self.conn.execute(
+                "DELETE FROM support_needs WHERE fight_id = ? AND discord_id = ?", (fight_id, str(discord_id)))
+        return cur.rowcount > 0
+
+    def support_needs(self, fight_id):
+        """{discord_id: {"helpers": n, "required": bool}}"""
+        rows = self.conn.execute(
+            "SELECT discord_id, helpers, required FROM support_needs WHERE fight_id = ?", (fight_id,)).fetchall()
+        return {r["discord_id"]: {"helpers": r["helpers"], "required": bool(r["required"])} for r in rows}
 
     # ------------------------------------------------------------ parties / drafts
 
